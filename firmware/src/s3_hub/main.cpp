@@ -380,6 +380,7 @@ void executeEspNowTx(EspNowTxAction action) {
   pkt.switch_mask = snap.switch_mask;
   pkt.away_mode   = snap.away_mode ? 1 : 0;
   pkt.alert_code  = snap.alert_code;
+  pkt.espnow_online = snap.espnow_online ? 1 : 0;
   pkt.ble_online  = (snap.espnow_online && snap.ble_online) ? 1 : 0;
   strncpy(pkt.alert_msg, snap.alert_msg, sizeof(pkt.alert_msg) - 1);
   pkt.alert_msg[sizeof(pkt.alert_msg) - 1] = '\0';
@@ -481,7 +482,7 @@ void TaskEspNow(void* pvParameters) {
           uint8_t newMask = p.switch_mask;
           bool newAway    = (p.away_mode != 0);
           if (newAway) {
-            newMask &= ~(SW_BED_LIGHT_BIT | SW_HALL_LIGHT_BIT);
+            newMask &= ~SW_BED_LIGHT_BIT;
           }
 
           if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -555,13 +556,10 @@ void publishBedroomTelemetry() {
 
   JsonObject sw = doc["switches"].to<JsonObject>();
   sw["sw1_bed_light"]  = (bool)(snap.switch_mask & SW_BED_LIGHT_BIT);
-  sw["sw2_hall_light"] = (bool)(snap.switch_mask & SW_HALL_LIGHT_BIT);
-  sw["sw3_fan"]        = (bool)(snap.switch_mask & SW_FAN_BIT);
-  sw["sw4_buzzer"]     = (bool)(snap.switch_mask & SW_BUZZER_BIT);
 
   doc["away_mode"]     = snap.away_mode;
 
-  char outBuf[400];
+  char outBuf[384];
   size_t len = serializeJson(doc, outBuf, sizeof(outBuf));
   bool ok = mqttClient.publish(TOPIC_TELEMETRY, (const uint8_t*)outBuf, len, false);
   Serial.printf("[MQTT -> %s] %s (%s)\n", TOPIC_TELEMETRY, outBuf, ok ? "OK" : "FAIL");
@@ -570,9 +568,11 @@ void publishBedroomTelemetry() {
 void publishHubStatus() {
   if (!mqttClient.connected()) return;
 
+  SystemState snap = getStateSnapshot();
   JsonDocument doc;
   doc["device"]       = "YoloUNO_Hub";
   doc["online"]       = true;
+  doc["away_mode"]    = snap.away_mode;
   doc["fw_version"]   = FW_VERSION;
   doc["wifi_channel"] = (long)WiFi.channel();
   doc["rssi"]         = WiFi.RSSI();
@@ -594,50 +594,48 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
   if (strcmp(topic, TOPIC_CMD_SWITCH) == 0) {
     const char* swName = doc["switch"] | "";
     bool targetState   = doc["state"]  | false;
+    const char* src    = doc["source"] | "unknown";
 
-    uint8_t bit = 0;
-    if      (strcmp(swName, "sw1_bed_light") == 0)  bit = SW_BED_LIGHT_BIT;
-    else if (strcmp(swName, "sw2_hall_light") == 0) bit = SW_HALL_LIGHT_BIT;
-    else if (strcmp(swName, "sw3_fan") == 0)        bit = SW_FAN_BIT;
-    else if (strcmp(swName, "sw4_buzzer") == 0)     bit = SW_BUZZER_BIT;
+    if (strcmp(swName, "sw1_bed_light") == 0) {
+      Serial.printf("[MQTT CMD] sw1_bed_light=%s (source=%s)\n",
+                    targetState ? "ON" : "OFF", src);
 
-    if (bit != 0) {
       if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        if (targetState) sysState.switch_mask |= bit;
-        else             sysState.switch_mask &= ~bit;
-        if (targetState && bit == SW_BED_LIGHT_BIT) sysState.away_mode = false;
+        if (targetState) {
+          sysState.switch_mask |= SW_BED_LIGHT_BIT;
+          sysState.away_mode = false;
+        } else {
+          sysState.switch_mask &= ~SW_BED_LIGHT_BIT;
+        }
         xSemaphoreGive(xStateMutex);
       }
       queueEspNowAction(TX_CMD_WROOM);
       queueEspNowAction(TX_SYNC_LVGL);
     }
   } else if (strcmp(topic, TOPIC_CMD_MODE) == 0) {
-    bool away      = doc["away_mode"]           | false;
-    bool offLights = doc["turn_off_all_lights"] | true;
+    bool away     = doc["away_mode"]      | false;
+    bool offLight = doc["turn_off_light"] | true;
 
     if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
       sysState.away_mode = away;
-      if (away && offLights) {
-        sysState.switch_mask &= ~(SW_BED_LIGHT_BIT | SW_HALL_LIGHT_BIT);
+      if (away && offLight) {
+        sysState.switch_mask &= ~SW_BED_LIGHT_BIT;
       }
       xSemaphoreGive(xStateMutex);
     }
     queueEspNowAction(TX_CMD_WROOM);
     queueEspNowAction(TX_SYNC_LVGL);
+    publishHubStatus();
   } else if (strcmp(topic, TOPIC_AI_ALERT) == 0) {
     uint8_t code    = doc["alert_code"] | ALERT_NONE;
-    bool buzzerOn   = doc["buzzer"]     | false;
     const char* msg = doc["message"]    | (code == ALERT_NONE ? "OK" : "CANH BAO AN NINH");
 
     if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
       sysState.alert_code = code;
       strncpy(sysState.alert_msg, msg, sizeof(sysState.alert_msg) - 1);
       sysState.alert_msg[sizeof(sysState.alert_msg) - 1] = '\0';
-      if (buzzerOn) sysState.switch_mask |= SW_BUZZER_BIT;
-      else          sysState.switch_mask &= ~SW_BUZZER_BIT;
       xSemaphoreGive(xStateMutex);
     }
-    queueEspNowAction(TX_CMD_WROOM);
     queueEspNowAction(TX_ALERT_LVGL);
   }
 }
@@ -934,7 +932,7 @@ void handleApiAway() {
       canControl = true;
       sysState.away_mode = !sysState.away_mode;
       if (sysState.away_mode) {
-        sysState.switch_mask &= ~(SW_BED_LIGHT_BIT | SW_HALL_LIGHT_BIT);
+        sysState.switch_mask &= ~SW_BED_LIGHT_BIT;
       }
     }
     xSemaphoreGive(xStateMutex);

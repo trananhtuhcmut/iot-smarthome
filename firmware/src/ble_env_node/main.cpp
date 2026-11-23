@@ -8,14 +8,15 @@
 #include <freertos/semphr.h>
 #include "ble_protocol.h"
 
-// ==================== CẤU HÌNH PHẦN CỨNG ====================
+// ==================== CẤU HÌNH PHẦN CỨNG (ESP32-S3 N16R8) ====================
 // 1 = Sinh dữ liệu ngẫu nhiên (chưa có cảm biến)
 // 0 = Đọc từ cảm biến DHT11 thật ở GPIO 4
 #define USE_MOCK_SENSOR  0
 
 #define PIN_DHT          4      // Chân DATA của DHT11 nối vào GPIO 4
 #define DHT_TYPE         DHT11
-#define PIN_LED_STATUS   8      // LED tích hợp trên ESP32-C3 SuperMini (Active LOW)
+#define PIN_RGB_LED      48     // LED RGB tích hợp trên ESP32-S3 N16R8 (nếu không sáng đổi thành 38)
+#define PIN_OUT_LOW      5      // Chân xuất mức LOW (chuyển từ GPIO 3 sang GPIO 5)
 
 const uint32_t UPDATE_INTERVAL_MS = 3000;
 
@@ -35,9 +36,12 @@ NimBLECharacteristic* pEnvChar = nullptr;
 
 volatile bool deviceConnected = false;
 
-// Giá trị nền cho bộ sinh ngẫu nhiên (random walk)
 float simTemp = 28.5f;
 float simHum  = 65.0f;
+
+void setStatusLed(uint8_t r, uint8_t g, uint8_t b) {
+  neopixelWrite(PIN_RGB_LED, r, g, b);
+}
 
 // ==================== CALLBACK KẾT NỐI BLE (NimBLE 2.x) ====================
 class EnvServerCallbacks : public NimBLEServerCallbacks {
@@ -114,11 +118,8 @@ void TaskSensor(void* pvParameters) {
 
   for (;;) {
     if (readEnvData(reading)) {
-      // Ghi đè luôn giữ mẫu mới nhất trong Queue
       xQueueOverwrite(xSensorQueue, &reading);
     }
-
-    // Giữ chu kỳ chuẩn xác 3000ms không bị trôi thời gian
     vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(UPDATE_INTERVAL_MS));
   }
 }
@@ -128,7 +129,6 @@ void TaskBleNotify(void* pvParameters) {
   EnvReading reading;
 
   for (;;) {
-    // Ngủ hoàn toàn cho tới khi TaskSensor gửi mẫu đo mới
     if (xQueueReceive(xSensorQueue, &reading, portMAX_DELAY) == pdTRUE) {
       char payload[24];
       snprintf(payload, sizeof(payload), "%.1f,%.1f", reading.temp, reading.hum);
@@ -138,7 +138,7 @@ void TaskBleNotify(void* pvParameters) {
       bool connected = deviceConnected;
       if (connected) {
         pEnvChar->notify();
-        xSemaphoreGive(xLedPulseSem); // Nháy LED báo đã gửi Notify
+        xSemaphoreGive(xLedPulseSem);
       }
 
       Serial.printf("[BLE %s] Temp: %.1f C | Hum: %.1f %% | Payload: '%s' (%s)\n",
@@ -153,23 +153,20 @@ void TaskBleNotify(void* pvParameters) {
 void TaskStatusLed(void* pvParameters) {
   for (;;) {
     if (deviceConnected) {
-      // Khi đã kết nối WROOM: chỉ nháy ngắn 40ms mỗi lần gửi Notify thành công
       if (xSemaphoreTake(xLedPulseSem, pdMS_TO_TICKS(200)) == pdTRUE) {
-        digitalWrite(PIN_LED_STATUS, LOW);
+        setStatusLed(0, 25, 0);
         vTaskDelay(pdMS_TO_TICKS(40));
-        digitalWrite(PIN_LED_STATUS, HIGH);
+        setStatusLed(0, 0, 0);
       }
     } else {
-      // Khi đang chờ kết nối (Advertising): nháy nhịp chậm 1.5s/lần để dễ nhận biết bằng mắt
-      digitalWrite(PIN_LED_STATUS, LOW);
+      setStatusLed(0, 0, 25);
       vTaskDelay(pdMS_TO_TICKS(80));
-      digitalWrite(PIN_LED_STATUS, HIGH);
+      setStatusLed(0, 0, 0);
 
-      // Chia nhỏ thời gian ngủ để phản ứng nhanh ngay khi WROOM vừa kết nối lại
       for (int i = 0; i < 14 && !deviceConnected; i++) {
         vTaskDelay(pdMS_TO_TICKS(100));
       }
-      xSemaphoreTake(xLedPulseSem, 0); // Xóa cờ thừa nếu có
+      xSemaphoreTake(xLedPulseSem, 0);
     }
   }
 }
@@ -181,34 +178,28 @@ void setup() {
 
   randomSeed(esp_random());
 
-  pinMode(PIN_LED_STATUS, OUTPUT);
-  digitalWrite(PIN_LED_STATUS, HIGH); // Tắt LED (Active LOW)
+  setStatusLed(0, 0, 0);
 
-  pinMode(3, OUTPUT);
-  digitalWrite(3, LOW); // Tắt LED (Active LOW)
-
+  pinMode(PIN_OUT_LOW, OUTPUT);
+  digitalWrite(PIN_OUT_LOW, LOW);
 
 #if !USE_MOCK_SENSOR
   dht.begin();
 #endif
 
-  // Tạo IPC trước khi khởi chạy BLE và Task
   xSensorQueue = xQueueCreate(1, sizeof(EnvReading));
   xLedPulseSem = xSemaphoreCreateBinary();
 
-  // Khởi tạo BLE Server trước để đảm bảo pEnvChar đã sẵn sàng
   initBleServer();
 
-  // ESP32-C3 là Single-Core -> dùng xTaskCreate (tự chạy trên Core 0)
   xTaskCreate(TaskBleNotify, "BleNotify", 4096, nullptr, 3, nullptr);
   xTaskCreate(TaskSensor,    "Sensor",    3072, nullptr, 2, nullptr);
   xTaskCreate(TaskStatusLed, "StatusLed", 2048, nullptr, 1, nullptr);
 
-  Serial.printf("[SYSTEM] ESP32-C3 FreeRTOS BLE Server san sang! (Che do: %s)\n",
+  Serial.printf("[SYSTEM] ESP32-S3 FreeRTOS BLE Server san sang! (Che do: %s)\n",
                 USE_MOCK_SENSOR ? "MOCK RANDOM" : "DHT11 THAT");
 }
 
 void loop() {
-  // Thu hồi ~8KB RAM của loopTask mặc định
   vTaskDelete(NULL);
 }

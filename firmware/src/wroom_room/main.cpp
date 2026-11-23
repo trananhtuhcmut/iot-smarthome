@@ -314,6 +314,7 @@ EspNowPacket buildTelemetryPacket() {
   pkt.switch_mask = snap.relayOn ? SW_BED_LIGHT_BIT : 0;
   pkt.away_mode   = snap.awayMode ? 1 : 0;
   pkt.alert_code  = ALERT_NONE;
+  pkt.espnow_online = 1;
   pkt.ble_online  = snap.bleOnline ? 1 : 0;
   return pkt;
 }
