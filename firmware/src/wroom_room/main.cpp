@@ -16,8 +16,8 @@
 #define PIN_LIGHT_AO      34  // ADC1 - cắm chân AO của MH-Sensor khi có hàng
 
 // Relay kích mức LOW (tải đấu COM + NO; nếu đấu COM + NC thì đảo ngược 2 dòng này)
-#define RELAY_ON          LOW
-#define RELAY_OFF         HIGH
+#define RELAY_OFF          LOW
+#define RELAY_ON           HIGH
 
 // 1 = Giả lập cảm biến ánh sáng, 0 = Đọc thật từ GPIO 34
 #define MOCK_LIGHT_SENSOR 0

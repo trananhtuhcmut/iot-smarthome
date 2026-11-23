@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="slate">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wi-Fi & MQTT Settings</title>
+  <script>
+    document.documentElement.setAttribute('data-theme', localStorage.getItem('hub_theme') || 'slate');
+  </script>
+  <style>
+     /* Theme 1: Rose & Cream (#FFCED8, #FFDDDD, #FFF4DE, #FFE8C4) */
+    :root, [data-theme="pastel"] {
+          --bg: #f7dfba;
+      --card: #FFFFFF;
+      --tile: #FFDDDD;
+      --border: #FFE8C4;
+      --title: #6e3b49;
+      --accent: #9e5468;
+      --ink: #3b232a;
+      --muted: #785861;
+      --btn-on-bg: #FFCED8;
+      --btn-on-text: #4a202c;
+      --btn-off-bg: #d97388;
+      --btn-off-text: #ffffff;
+      --btn-blue-bg: #FFE8C4;
+      --btn-blue-text: #4d3519;
+      --btn-gray-bg: #FFDDDD;
+      --btn-gray-text: #4a202c;
+      --pill-bg: #FFE8C4;
+      --pill-text: #4d3519;
+      --alert-bg: #FFCED8;
+      --alert-border: #d97388;
+      --alert-text: #4a202c;
+    }
+
+    /* Theme 2: Cyan & Grape (#59C3C3, #52489C, #EBEBEB, #CAD2C5, #84A98C) */
+    [data-theme="cyan"] {
+      --bg: #dff4fc;
+      --card: #FFFFFF;
+      --tile: #EBEBEB;
+      --border: #CAD2C5;
+      --title: #52489C;
+      --accent: #84A98C;
+      --ink: #1e2438;
+      --muted: #556270;
+      --btn-on-bg: #59C3C3;
+      --btn-on-text: #10252b;
+      --btn-off-bg: #52489C;
+      --btn-off-text: #ffffff;
+      --btn-blue-bg: #84A98C;
+      --btn-blue-text: #ffffff;
+      --btn-gray-bg: #CAD2C5;
+      --btn-gray-text: #1e2438;
+      --pill-bg: #CAD2C5;
+      --pill-text: #1e2438;
+      --alert-bg: #52489C;
+      --alert-border: #59C3C3;
+      --alert-text: #ffffff;
+    }
+
+    /* Theme 3: Peach & Sky (#F4BAA3, #F4F0E2, #A6C8E2, #619DC6) */
+    [data-theme="peach"] {
+      --bg: #e4f4e2;
+      --card: #FFFFFF;
+      --tile: #F4F0E2;
+      --border: #A6C8E2;
+      --title: #163047;
+      --accent: #619DC6;
+      --ink: #163047;
+      --muted: #526D82;
+      --btn-on-bg: #619DC6;
+      --btn-on-text: #ffffff;
+      --btn-off-bg: #F4BAA3;
+      --btn-off-text: #4a2016;
+      --btn-blue-bg: #A6C8E2;
+      --btn-blue-text: #163047;
+      --btn-gray-bg: #F4F0E2;
+      --btn-gray-text: #163047;
+      --pill-bg: #A6C8E2;
+      --pill-text: #163047;
+      --alert-bg: #F4BAA3;
+      --alert-border: #c96a46;
+      --alert-text: #4a2016;
+    }
+
+/* Theme 4: Modern Slate (Light & Auto Dark Mode) */
+    [data-theme="slate"] {
+      --bg: #f1f5f9;
+      --card: #ffffff;
+      --tile: #f8fafc;
+      --border: #e2e8f0;
+      --title: #0f172a;
+      --accent: #2563eb;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --shadow: 0 4px 16px -2px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.04);
+      --btn-on-bg: #16a34a;
+      --btn-on-text: #ffffff;
+      --btn-off-bg: #dc2626;
+      --btn-off-text: #ffffff;
+      --btn-blue-bg: #2563eb;
+      --btn-blue-text: #ffffff;
+      --btn-gray-bg: #334155;
+      --btn-gray-text: #ffffff;
+      --pill-bg: #e2e8f0;
+      --pill-text: #0f172a;
+      --alert-bg: #fef2f2;
+      --alert-border: #dc2626;
+      --alert-text: #991b1b;
+    }
+@media (prefers-color-scheme: dark) {
+      [data-theme="slate"] {
+        --bg: #0b1120;
+        --card: #1e293b;
+        --tile: #0f172a;
+        --border: #334155;
+        --title: #f8fafc;
+        --accent: #60a5fa;
+        --ink: #f8fafc;
+        --muted: #94a3b8;
+        --shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+        --pill-bg: #334155;
+        --pill-text: #f8fafc;
+        --alert-bg: #450a0a;
+        --alert-border: #dc2626;
+        --alert-text: #fecaca;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 460px;
+      margin: 0 auto;
+      padding: 22px 16px 36px;
+      color: var(--ink);
+      background: var(--bg);
+      line-height: 1.5;
+      transition: background-color 0.25s ease, color 0.25s ease;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Header & Theme Switcher */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+
+    h2 {
+      font-size: 18.5px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--title);
+    }
+
+    .theme-sw {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--card);
+      border: 1.5px solid var(--border);
+      padding: 4px 8px;
+      border-radius: 999px;
+    }
+
+    .sw-dot {
+      width: 16px;
+      height: 16px;
+      padding: 0;
+      border-radius: 50%;
+      border: 1.5px solid rgba(128, 128, 128, 0.35);
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .sw-dot:hover { transform: scale(1.12); }
+    .sw-dot.active {
+      box-shadow: 0 0 0 2px var(--card), 0 0 0 3.5px var(--title);
+      transform: scale(1.08);
+    }
+
+    /* Cards */
+    .card {
+      background: var(--card);
+      border: 1.5px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow);
+      transition: background-color 0.25s ease, border-color 0.25s ease;
+    }
+
+    .section-title {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 11.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--accent);
+      margin-bottom: 4px;
+    }
+
+    .section-title svg { stroke: var(--accent); }
+    .section-title.danger { color: var(--danger); }
+    .section-title.danger svg { stroke: var(--danger); }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      margin-top: 12px;
+      margin-bottom: 5px;
+      color: var(--ink);
+    }
+
+    input {
+      width: 100%;
+      padding: 10px 12px;
+      background: var(--input-bg);
+      color: var(--ink);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.25s ease;
+    }
+
+    input::placeholder {
+      color: var(--muted);
+      opacity: 0.85;
+    }
+
+    input:focus {
+      background: var(--input-focus);
+      border-color: var(--focus);
+      box-shadow: 0 0 0 3px var(--focus-ring);
+    }
+
+    hr {
+      margin: 18px 0 16px;
+      border: none;
+      border-top: 1px solid var(--border);
+    }
+
+    /* Buttons */
+    .btn-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    button:not(.sw-dot) {
+      width: 100%;
+      padding: 11px 14px;
+      border: none;
+      border-radius: 10px;
+      font-size: 13.5px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.08s ease, filter 0.15s ease, background-color 0.25s ease;
+    }
+
+    button:not(.sw-dot):hover { filter: brightness(0.95); }
+    button:not(.sw-dot):active { transform: scale(0.98); }
+
+    .on { background: var(--btn-on-bg); color: var(--btn-on-text); }
+    .off { background: var(--btn-off-bg); color: var(--btn-off-text); margin-top: 12px; }
+    .gray { background: var(--btn-gray-bg); color: var(--btn-gray-text); }
+
+    a { display: block; text-decoration: none; }
+
+    .desc {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+
+    .footer {
+      display: block;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h2>Wi-Fi & MQTT Settings (NVS)</h2>
+    <div class="theme-sw" title="Switch color palette">
+              <button type="button" class="sw-dot" data-t="slate" onclick="setTheme('slate')" style="background:linear-gradient(135deg,#f1f5f9 50%,#0b1120 50%)" aria-label="Modern Slate"></button>
+
+      <button type="button" class="sw-dot" data-t="pastel" onclick="setTheme('pastel')" style="background:linear-gradient(135deg,#FFCED8 50%,#FFE8C4 50%)" aria-label="Rose & Cream"></button>
+      <button type="button" class="sw-dot" data-t="cyan" onclick="setTheme('cyan')" style="background:linear-gradient(135deg,#59C3C3 50%,#52489C 50%)" aria-label="Cyan & Grape"></button>
+      <button type="button" class="sw-dot" data-t="peach" onclick="setTheme('peach')" style="background:linear-gradient(135deg,#619DC6 50%,#F4BAA3 50%)" aria-label="Peach & Sky"></button>
+    </div>
+  </div>
+
+  <div class="card">
+    <form method="POST" action="/save">
+      <b class="section-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+        <span>1. Wi-Fi Router Network</span>
+      </b>
+
+      <label for="ssid">Wi-Fi Name (SSID)</label>
+      <input id="ssid" name="ssid" maxlength="32" required placeholder="Enter 2.4GHz Wi-Fi name">
+
+      <label for="pass">Wi-Fi Password</label>
+      <input id="pass" name="pass" type="password" maxlength="64" placeholder="Enter Wi-Fi password">
+
+      <hr>
+
+      <b class="section-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+        <span>2. Local MQTT Broker (Mosquitto)</span>
+      </b>
+
+      <label for="mqtt_host">Broker IP Address</label>
+      <input id="mqtt_host" name="mqtt_host" maxlength="64" placeholder="e.g. 192.168.1.100">
+
+      <label for="mqtt_port">Port</label>
+      <input id="mqtt_port" name="mqtt_port" type="number" min="1" max="65535" value="1883">
+
+      <label for="mqtt_user">MQTT Username (optional)</label>
+      <input id="mqtt_user" name="mqtt_user" maxlength="32" placeholder="Leave blank if unused">
+
+      <label for="mqtt_pass">MQTT Password (optional)</label>
+      <input id="mqtt_pass" name="mqtt_pass" type="password" maxlength="64" placeholder="Leave blank if unused">
+
+      <div class="btn-row">
+        <button type="submit" class="on">Save & Apply</button>
+        <a href="/"><button type="button" class="gray">Back</button></a>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <b class="section-title danger">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      <span>Factory Reset</span>
+    </b>
+    <small class="desc">Erase Wi-Fi & MQTT settings from NVS and broadcast the YoloUNO_Offline access point.</small>
+    <form method="POST" action="/reset" onsubmit="return confirm('Erase all Wi-Fi and MQTT settings?');">
+      <button type="submit" class="off">Erase Configuration (Reset NVS)</button>
+    </form>
+  </div>
+
+  <small class="footer">Settings stored in NVS — interface loaded from LittleFS.</small>
+
+  <script>
+    function setTheme(t) {
+      document.documentElement.setAttribute('data-theme', t);
+      localStorage.setItem('hub_theme', t);
+      document.querySelectorAll('.sw-dot').forEach(b => b.classList.toggle('active', b.dataset.t === t));
+    }
+    setTheme(localStorage.getItem('hub_theme') || 'pastel');
+
+    fetch('/api/config')
+      .then(r => r.json())
+      .then(c => {
+        document.getElementById('ssid').value = c.ssid || '';
+        document.getElementById('mqtt_host').value = c.mqtt_host || '';
+        document.getElementById('mqtt_port').value = c.mqtt_port || 1883;
+        document.getElementById('mqtt_user').value = c.mqtt_user || '';
+        if (c.has_pass) {
+          document.getElementById('pass').placeholder = 'Leave blank to keep current password';
+        }
+      })
+      .catch(console.error);
+  </script>
+</body>
+</html>

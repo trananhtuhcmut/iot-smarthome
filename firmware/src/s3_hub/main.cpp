@@ -14,6 +14,7 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include "espnow_protocol.h"
+#include <LittleFS.h>
 
 // ==================== CẤU HÌNH PHẦN CỨNG ====================
 #define NEO_PIN          45    // Đèn RGB NeoPixel tích hợp trên mạch YoloUNO (ESP32-S3)
@@ -27,7 +28,12 @@
 #define FALLBACK_AP_PASS  "12345678"
 #define DEFAULT_MQTT_PORT 1883
 
-#define FW_VERSION "1.1.0-nvs"
+// Giám sát mất kết nối WROOM & bộ đệm đồ thị
+#define ESPNOW_TIMEOUT_MS       10000 // Quá 10s không nhận gói từ WROOM -> Offline
+#define HISTORY_MAX_POINTS      30    // Lưu 30 mẫu gần nhất (~90 giây) cho đồ thị
+#define HISTORY_MIN_INTERVAL_MS 2000  // Chống ghi dồn mẫu khi bấm nút nhanh
+
+#define FW_VERSION "1.2.0-chart"
 
 // ==================== CÁC TOPIC LOCAL MQTT (HỢP ĐỒNG 2) ====================
 const char* TOPIC_TELEMETRY  = "smarthome/bedroom/telemetry";
@@ -96,29 +102,53 @@ SemaphoreHandle_t xMqttPubTelemetrySem = nullptr;
 QueueHandle_t     xEspNowRxQueue       = nullptr;
 QueueHandle_t     xEspNowTxQueue       = nullptr;
 
-// ==================== TRẠNG THÁI DÙNG CHUNG ====================
+// ==================== TRẠNG THÁI DÙNG CHUNG & LỊCH SỬ ĐỒ THỊ ====================
 struct SystemState {
   float    temperature   = 0.0f;
   float    humidity      = 0.0f;
   uint16_t light_lux     = 0;
   uint8_t  switch_mask   = 0;
   bool     away_mode     = false;
-  bool     ble_online    = false;
+  bool     espnow_online = false; // Trạng thái kết nối tới WROOM
+  bool     ble_online    = false; // Trạng thái kết nối BLE từ C3 qua WROOM
   uint8_t  alert_code    = ALERT_NONE;
   char     alert_msg[32] = "OK";
   uint16_t last_rx_seq   = 0;
   uint32_t last_rx_ms    = 0;
 } sysState;
 
+struct HistoryPoint {
+  float temp;
+  float hum;
+};
+
+HistoryPoint envHistory[HISTORY_MAX_POINTS];
+uint8_t  historyHead       = 0;
+uint8_t  historyCount      = 0;
+uint32_t lastHistoryPushMs = 0;
+
+// Chỉ gọi khi ĐÃ giữ xStateMutex
+void pushEnvHistoryLocked(float temp, float hum) {
+  uint32_t now = millis();
+  if (historyCount > 0 && (now - lastHistoryPushMs < HISTORY_MIN_INTERVAL_MS)) {
+    return;
+  }
+  envHistory[historyHead].temp = roundf(temp * 10.0f) / 10.0f;
+  envHistory[historyHead].hum  = roundf(hum * 10.0f) / 10.0f;
+  historyHead = (historyHead + 1) % HISTORY_MAX_POINTS;
+  if (historyCount < HISTORY_MAX_POINTS) {
+    historyCount++;
+  }
+  lastHistoryPushMs = now;
+}
+
 // ==================== BIẾN NỘI BỘ TỪNG TASK ====================
-// TaskEspNow
 uint8_t wroomMac[6] = {0};
 bool hasWroomMac    = false;
 uint8_t lvglMac[6]  = {0};
 bool hasLvglMac     = false;
 uint16_t hubSeq     = 0;
 
-// TaskNetworkMqtt (giữ bộ đệm tĩnh cố định vì PubSubClient chỉ lưu con trỏ host)
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 char     activeMqttHost[65] = "";
@@ -137,12 +167,11 @@ uint32_t wifiRetryStartMs   = 0;
 uint32_t lastMqttRetryMs    = 0;
 uint32_t lastStatusPubMs    = 0;
 
-const uint32_t WIFI_RETRY_INTERVAL_MS = 30000; // 30s thử tìm lại router 1 lần
-const uint32_t WIFI_RETRY_TIMEOUT_MS  = 5000;  // Chờ tối đa 5s mỗi lần thử
-const uint32_t MQTT_RETRY_INTERVAL_MS = 5000;  // 5s thử nối lại Broker MQTT 1 lần
+const uint32_t WIFI_RETRY_INTERVAL_MS = 30000;
+const uint32_t WIFI_RETRY_TIMEOUT_MS  = 5000;
+const uint32_t MQTT_RETRY_INTERVAL_MS = 5000;
 const uint32_t STATUS_PUB_INTERVAL_MS = 10000;
 
-// TaskWebServer (kèm Captive Portal khi ở chế độ AP)
 WebServer webServer(80);
 DNSServer dnsServer;
 bool dnsRunning = false;
@@ -159,13 +188,13 @@ AppConfig getConfigSnapshot() {
 
 void loadConfigFromNvs() {
   AppConfig cfg = {"", "", "", DEFAULT_MQTT_PORT, "", ""};
-  if (prefs.begin("smarthome", true)) { // true = chế độ chỉ đọc
-    String sSsid = prefs.getString("wifi_ssid", "");
-    String sPass = prefs.getString("wifi_pass", "");
-    String sHost = prefs.getString("mqtt_host", "");
+  if (prefs.begin("smarthome", true)) {
+    String sSsid  = prefs.getString("wifi_ssid", "");
+    String sPass  = prefs.getString("wifi_pass", "");
+    String sHost  = prefs.getString("mqtt_host", "");
     uint16_t port = prefs.getUShort("mqtt_port", DEFAULT_MQTT_PORT);
-    String sUser = prefs.getString("mqtt_user", "");
-    String sMpas = prefs.getString("mqtt_pass", "");
+    String sUser  = prefs.getString("mqtt_user", "");
+    String sMpas  = prefs.getString("mqtt_pass", "");
     prefs.end();
 
     strncpy(cfg.wifi_ssid, sSsid.c_str(), sizeof(cfg.wifi_ssid) - 1);
@@ -188,7 +217,7 @@ void loadConfigFromNvs() {
 }
 
 void saveConfigToNvs(const AppConfig& cfg) {
-  if (prefs.begin("smarthome", false)) { // false = chế độ đọc/ghi
+  if (prefs.begin("smarthome", false)) {
     prefs.putString("wifi_ssid", cfg.wifi_ssid);
     prefs.putString("wifi_pass", cfg.wifi_pass);
     prefs.putString("mqtt_host", cfg.mqtt_host);
@@ -236,21 +265,6 @@ void printMac(const uint8_t* mac) {
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-String htmlEscape(const char* src) {
-  String out;
-  for (size_t i = 0; src[i] != '\0'; i++) {
-    switch (src[i]) {
-      case '&':  out += "&amp;";  break;
-      case '<':  out += "&lt;";   break;
-      case '>':  out += "&gt;";   break;
-      case '"':  out += "&quot;"; break;
-      case '\'': out += "&#39;";  break;
-      default:   out += src[i];   break;
-    }
-  }
-  return out;
-}
-
 // ==================== TASK 4: NEOPIXEL + NÚT BOOT RESET 5S (CORE 1 - ƯU TIÊN 1) ====================
 void TaskNeoPixelAndBootBtn(void* pvParameters) {
   Adafruit_NeoPixel strip(LED_COUNT, NEO_PIN, NEO_GRB + NEO_KHZ800);
@@ -267,7 +281,6 @@ void TaskNeoPixelAndBootBtn(void* pvParameters) {
   bool blinkToggle          = false;
 
   for (;;) {
-    // 1. Kiểm tra nhấn giữ nút BOOT (GPIO 0) 5 giây để Factory Reset NVS
     if (digitalRead(PIN_BOOT_BTN) == LOW) {
       if (!wasHoldingBtn) {
         wasHoldingBtn  = true;
@@ -277,7 +290,6 @@ void TaskNeoPixelAndBootBtn(void* pvParameters) {
 
       uint32_t heldMs = millis() - btnHoldStartMs;
 
-      // Nháy nhanh Đỏ/Tắt để báo hiệu đang đếm ngược Reset
       blinkToggle = !blinkToggle;
       uint32_t c = blinkToggle ? strip.Color(255, 0, 0) : strip.Color(0, 0, 0);
       for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, c);
@@ -285,7 +297,6 @@ void TaskNeoPixelAndBootBtn(void* pvParameters) {
 
       if (heldMs >= 5000) {
         clearConfigNvs();
-        // Nháy sáng trắng xác nhận đã xóa xong rồi khởi động lại vào AP
         for (int k = 0; k < 4; k++) {
           uint32_t wc = (k % 2 == 0) ? strip.Color(255, 255, 255) : strip.Color(0, 0, 0);
           for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, wc);
@@ -298,31 +309,21 @@ void TaskNeoPixelAndBootBtn(void* pvParameters) {
       vTaskDelay(pdMS_TO_TICKS(120));
       continue;
     } else if (wasHoldingBtn) {
-      // Người dùng thả nút trước 5 giây -> trả lại đúng màu FSM hiện tại
       wasHoldingBtn     = false;
       lastRenderedState = 255;
       Serial.println("[BOOT] Da tha nut truoc 5 giay -> Huy Factory Reset.");
     }
 
-    // 2. Hiển thị đúng 4 màu trạng thái FSM
     NetState st = currentNetState;
     if ((uint8_t)st != lastRenderedState) {
       lastRenderedState = (uint8_t)st;
 
       uint32_t color = 0;
       switch (st) {
-        case NET_INIT:
-          color = strip.Color(255, 0, 0);    // Đỏ: Đang khởi tạo
-          break;
-        case NET_ONLINE:
-          color = strip.Color(0, 255, 0);    // Xanh lá: Wi-Fi + MQTT OK
-          break;
-        case NET_MQTT_OFFLINE_LAN:
-          color = strip.Color(180, 0, 255);  // Tím: Wi-Fi LAN OK, MQTT lỗi
-          break;
-        case NET_WIFI_OFFLINE_AP:
-          color = strip.Color(0, 0, 255);    // Xanh dương: Offline AP / Chờ cấu hình
-          break;
+        case NET_INIT:             color = strip.Color(255, 0, 0);   break; // Đỏ
+        case NET_ONLINE:           color = strip.Color(0, 255, 0);   break; // Xanh lá
+        case NET_MQTT_OFFLINE_LAN: color = strip.Color(180, 0, 255); break; // Tím
+        case NET_WIFI_OFFLINE_AP:  color = strip.Color(0, 0, 255);   break; // Xanh dương
       }
 
       for (int i = 0; i < LED_COUNT; i++) {
@@ -379,7 +380,7 @@ void executeEspNowTx(EspNowTxAction action) {
   pkt.switch_mask = snap.switch_mask;
   pkt.away_mode   = snap.away_mode ? 1 : 0;
   pkt.alert_code  = snap.alert_code;
-  pkt.ble_online  = snap.ble_online ? 1 : 0;
+  pkt.ble_online  = (snap.espnow_online && snap.ble_online) ? 1 : 0;
   strncpy(pkt.alert_msg, snap.alert_msg, sizeof(pkt.alert_msg) - 1);
   pkt.alert_msg[sizeof(pkt.alert_msg) - 1] = '\0';
 
@@ -419,12 +420,13 @@ void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
   xQueueSend(xEspNowRxQueue, &item, 0);
 }
 
-// ==================== TASK 1: ĐIỀU PHỐI ESP-NOW (CORE 1 - ƯU TIÊN 3) ====================
+// ==================== TASK 1: ĐIỀU PHỐI ESP-NOW + GIÁM SÁT TIMEOUT (CORE 1 - ƯU TIÊN 3) ====================
 void TaskEspNow(void* pvParameters) {
   EspNowRxItem rxItem;
   EspNowTxAction txAction;
 
   for (;;) {
+    // 1. Nhận gói tin ESP-NOW từ WROOM / LVGL
     while (xQueueReceive(xEspNowRxQueue, &rxItem, 0) == pdTRUE) {
       const EspNowPacket& p = rxItem.pkt;
 
@@ -437,14 +439,23 @@ void TaskEspNow(void* pvParameters) {
 
         if (p.msg_type == MSG_TELEMETRY) {
           if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            sysState.temperature = p.temperature;
-            sysState.humidity    = p.humidity;
-            sysState.light_lux   = p.light_lux;
-            sysState.switch_mask = p.switch_mask;
-            sysState.away_mode   = (p.away_mode != 0);
-            sysState.ble_online  = (p.ble_online != 0);
-            sysState.last_rx_seq = p.seq;
-            sysState.last_rx_ms  = millis();
+            if (!sysState.espnow_online) {
+              Serial.println("[ESP-NOW] >>> WROOM da ket noi tro lai!");
+            }
+            sysState.espnow_online = true;
+            sysState.temperature   = p.temperature;
+            sysState.humidity      = p.humidity;
+            sysState.light_lux     = p.light_lux;
+            sysState.switch_mask   = p.switch_mask;
+            sysState.away_mode     = (p.away_mode != 0);
+            sysState.ble_online    = (p.ble_online != 0);
+            sysState.last_rx_seq   = p.seq;
+            sysState.last_rx_ms    = millis();
+
+            // Chỉ lưu vào đồ thị khi cảm biến BLE đang có số liệu hợp lệ
+            if (sysState.ble_online) {
+              pushEnvHistoryLocked(p.temperature, p.humidity);
+            }
             xSemaphoreGive(xStateMutex);
           }
 
@@ -487,6 +498,24 @@ void TaskEspNow(void* pvParameters) {
       }
     }
 
+    // 2. Kiểm tra mất kết nối WROOM (quá 10 giây không nhận gói ESP-NOW)
+    bool wroomTimedOut = false;
+    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      if (sysState.espnow_online && (millis() - sysState.last_rx_ms > ESPNOW_TIMEOUT_MS)) {
+        sysState.espnow_online = false;
+        sysState.ble_online    = false;
+        wroomTimedOut          = true;
+      }
+      xSemaphoreGive(xStateMutex);
+    }
+
+    if (wroomTimedOut) {
+      Serial.println("[ESP-NOW] Mat ket noi WROOM (>10s khong co goi tin) -> espnow_online=0, ble_online=0");
+      xSemaphoreGive(xMqttPubTelemetrySem);
+      executeEspNowTx(TX_SYNC_LVGL);
+    }
+
+    // 3. Gửi các lệnh ESP-NOW đang chờ
     while (xQueueReceive(xEspNowTxQueue, &txAction, 0) == pdTRUE) {
       executeEspNowTx(txAction);
     }
@@ -516,12 +545,13 @@ void publishBedroomTelemetry() {
 
   SystemState snap = getStateSnapshot();
   JsonDocument doc;
-  doc["device"]      = "Bedroom_Node";
-  doc["ts"]          = (uint32_t)(millis() / 1000);
-  doc["temperature"] = roundf(snap.temperature * 10.0f) / 10.0f;
-  doc["humidity"]    = roundf(snap.humidity * 10.0f) / 10.0f;
-  doc["ble_online"]  = snap.ble_online;
-  doc["light"]       = snap.light_lux;
+  doc["device"]        = "Bedroom_Node";
+  doc["ts"]            = (uint32_t)(millis() / 1000);
+  doc["espnow_online"] = snap.espnow_online;
+  doc["ble_online"]    = snap.espnow_online && snap.ble_online;
+  doc["temperature"]   = roundf(snap.temperature * 10.0f) / 10.0f;
+  doc["humidity"]      = roundf(snap.humidity * 10.0f) / 10.0f;
+  doc["light"]         = snap.light_lux;
 
   JsonObject sw = doc["switches"].to<JsonObject>();
   sw["sw1_bed_light"]  = (bool)(snap.switch_mask & SW_BED_LIGHT_BIT);
@@ -529,9 +559,9 @@ void publishBedroomTelemetry() {
   sw["sw3_fan"]        = (bool)(snap.switch_mask & SW_FAN_BIT);
   sw["sw4_buzzer"]     = (bool)(snap.switch_mask & SW_BUZZER_BIT);
 
-  doc["away_mode"]   = snap.away_mode;
+  doc["away_mode"]     = snap.away_mode;
 
-  char outBuf[384];
+  char outBuf[400];
   size_t len = serializeJson(doc, outBuf, sizeof(outBuf));
   bool ok = mqttClient.publish(TOPIC_TELEMETRY, (const uint8_t*)outBuf, len, false);
   Serial.printf("[MQTT -> %s] %s (%s)\n", TOPIC_TELEMETRY, outBuf, ok ? "OK" : "FAIL");
@@ -646,7 +676,7 @@ void enterWifiOfflineAp() {
   if (mqttClient.connected()) {
     mqttClient.disconnect();
   }
-  WiFi.disconnect(false); // Dừng STA quét ngầm để không làm nhảy kênh ESP-NOW
+  WiFi.disconnect(false);
   WiFi.softAP(FALLBACK_AP_SSID, FALLBACK_AP_PASS, FALLBACK_CHANNEL);
   esp_wifi_set_channel(FALLBACK_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
@@ -666,7 +696,6 @@ void TaskNetworkMqtt(void* pvParameters) {
   syncActiveMqttConfig();
 
   for (;;) {
-    // Nếu người dùng vừa đổi IP/Port MQTT trực tiếp trên mạng LAN -> áp dụng ngay không cần reboot
     if (mqttConfigDirty) {
       mqttConfigDirty = false;
       if (mqttClient.connected()) {
@@ -680,27 +709,24 @@ void TaskNetworkMqtt(void* pvParameters) {
     }
 
     switch (currentNetState) {
-
-      // ---------- TRẠNG THÁI 0: ĐANG KHỞI TẠO (ĐỎ) ----------
       case NET_INIT: {
         if (WiFi.status() != WL_CONNECTED) {
-          enterWifiOfflineAp(); // Chuyển sang Xanh dương (AP cấu hình / cứu hộ)
+          enterWifiOfflineAp();
         } else {
           WiFi.softAPdisconnect(true);
           if (connectMqttOnce()) {
-            setNetState(NET_ONLINE);            // Xanh lá
+            setNetState(NET_ONLINE);
           } else {
             lastMqttRetryMs = millis();
-            setNetState(NET_MQTT_OFFLINE_LAN);  // Tím (Web T07 vẫn chạy trên LAN)
+            setNetState(NET_MQTT_OFFLINE_LAN);
           }
         }
         break;
       }
 
-      // ---------- TRẠNG THÁI 1: ONLINE ĐẦY ĐỦ (XANH LÁ) ----------
       case NET_ONLINE: {
         if (WiFi.status() != WL_CONNECTED) {
-          enterWifiOfflineAp(); // Rớt Wi-Fi -> Xanh dương
+          enterWifiOfflineAp();
           break;
         }
         if (!mqttClient.connected()) {
@@ -722,10 +748,9 @@ void TaskNetworkMqtt(void* pvParameters) {
         break;
       }
 
-      // ---------- TRẠNG THÁI 2: CÓ WI-FI LAN, LỖI MQTT (TÍM) ----------
       case NET_MQTT_OFFLINE_LAN: {
         if (WiFi.status() != WL_CONNECTED) {
-          enterWifiOfflineAp(); // Mất hẳn Wi-Fi mới bật AP riêng -> Xanh dương
+          enterWifiOfflineAp();
           break;
         }
 
@@ -733,13 +758,12 @@ void TaskNetworkMqtt(void* pvParameters) {
           forceMqttRetryNow = false;
           lastMqttRetryMs   = millis();
           if (connectMqttOnce()) {
-            setNetState(NET_ONLINE); // Broker sống lại -> Xanh lá
+            setNetState(NET_ONLINE);
           }
         }
         break;
       }
 
-      // ---------- TRẠNG THÁI 3: MẤT WI-FI / CHƯA CẤU HÌNH -> AP (XANH DƯƠNG) ----------
       case NET_WIFI_OFFLINE_AP: {
         if (WiFi.status() == WL_CONNECTED) {
           WiFi.softAPdisconnect(true);
@@ -747,11 +771,10 @@ void TaskNetworkMqtt(void* pvParameters) {
           forceMqttRetryNow = true;
           Serial.printf("[WIFI] >>> Router da song lai! Kenh %ld | Web LAN: http://%s/\n",
                         (long)WiFi.channel(), WiFi.localIP().toString().c_str());
-          setNetState(NET_MQTT_OFFLINE_LAN); // Tím -> tự thử nối MQTT ngay
+          setNetState(NET_MQTT_OFFLINE_LAN);
           break;
         }
 
-        // Chỉ thử tìm lại router mỗi 30s nếu NVS đã lưu sẵn tên Wi-Fi
         AppConfig cfg = getConfigSnapshot();
         if (strlen(cfg.wifi_ssid) == 0) {
           break;
@@ -776,26 +799,40 @@ void TaskNetworkMqtt(void* pvParameters) {
   }
 }
 
-// ==================== LOCAL WEB SERVER (T07) & TRANG /config ====================
-const char* COMMON_CSS =
-  "<style>"
-  "body{font-family:sans-serif;max-width:440px;margin:20px auto;padding:0 16px;color:#111;background:#fafafa}"
-  ".card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-bottom:12px}"
-  ".badge{display:inline-block;padding:6px 10px;border-radius:6px;color:#fff;font-size:13px;font-weight:bold;margin-bottom:12px}"
-  "label{display:block;font-size:13px;font-weight:bold;margin-top:10px;margin-bottom:4px}"
-  "input{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:14px}"
-  "button{padding:10px 16px;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;margin-right:8px;margin-top:8px}"
-  ".on{background:#16a34a;color:#fff}.off{background:#dc2626;color:#fff}"
-  ".blue{background:#2563eb;color:#fff}.gray{background:#475569;color:#fff}"
-  ".alert{background:#fee2e2;color:#991b1b;padding:10px;border-radius:6px;font-weight:bold;margin-bottom:12px}"
-  "small{color:#64748b}"
-  "</style>";
+// ==================== LOCAL WEB SERVER (T07 - LITTLEFS + JSON API) ====================
+void serveHtmlFile(const char* path) {
+  if (!LittleFS.exists(path)) {
+    webServer.send(404, "text/plain",
+                   "Chua nap file HTML! Hay chay 'Upload Filesystem Image' trong PlatformIO.");
+    return;
+  }
+  File file = LittleFS.open(path, "r");
+  webServer.streamFile(file, "text/html");
+  file.close();
+}
 
-void handleWebRoot() {
-  SystemState snap = getStateSnapshot();
-  NetState st      = currentNetState;
-  bool relayOn     = (snap.switch_mask & SW_BED_LIGHT_BIT) != 0;
+void handleWebRoot()   { serveHtmlFile("/index.html");  }
+void handleWebConfig() { serveHtmlFile("/config.html"); }
 
+void handleApiStatus() {
+  SystemState snap;
+  float histTempCopy[HISTORY_MAX_POINTS];
+  float histHumCopy[HISTORY_MAX_POINTS];
+  uint8_t histCountCopy = 0;
+
+  if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    snap = sysState;
+    histCountCopy = historyCount;
+    uint8_t startIdx = (historyCount == HISTORY_MAX_POINTS) ? historyHead : 0;
+    for (uint8_t i = 0; i < historyCount; i++) {
+      uint8_t idx     = (startIdx + i) % HISTORY_MAX_POINTS;
+      histTempCopy[i] = envHistory[idx].temp;
+      histHumCopy[i]  = envHistory[idx].hum;
+    }
+    xSemaphoreGive(xStateMutex);
+  }
+
+  NetState st = currentNetState;
   String netBanner, badgeColor;
   if (st == NET_ONLINE) {
     netBanner  = "ONLINE (Wi-Fi + MQTT) | LAN: " + WiFi.localIP().toString();
@@ -811,74 +848,110 @@ void handleWebRoot() {
     badgeColor = "#dc2626";
   }
 
-  String html = "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-                "<meta http-equiv='refresh' content='3'>"
-                "<title>YoloUNO Local Hub (T07)</title>" + String(COMMON_CSS) + "</head><body>"
-                "<h2>YoloUNO Local Hub (T07)</h2>"
-                "<div class='badge' style='background:" + badgeColor + "'>" + netBanner + "</div>";
+  bool espNowOk = snap.espnow_online;
+  bool bleOk    = espNowOk && snap.ble_online;
 
-  if (snap.alert_code != ALERT_NONE) {
-    html += "<div class='alert'>CANH BAO: " + htmlEscape(snap.alert_msg) + "</div>";
+  JsonDocument doc;
+  doc["net_banner"]    = netBanner;
+  doc["badge_color"]   = badgeColor;
+  doc["espnow_online"] = espNowOk;
+  doc["ble_online"]    = bleOk;
+  doc["temperature"]   = roundf(snap.temperature * 10.0f) / 10.0f;
+  doc["humidity"]      = roundf(snap.humidity * 10.0f) / 10.0f;
+  doc["light_lux"]     = snap.light_lux;
+  doc["relay_on"]      = (bool)(snap.switch_mask & SW_BED_LIGHT_BIT);
+  doc["away_mode"]     = snap.away_mode;
+  doc["alert_code"]    = snap.alert_code;
+  doc["alert_msg"]     = snap.alert_msg;
+  doc["last_rx_seq"]   = snap.last_rx_seq;
+  doc["fw_version"]    = FW_VERSION;
+  doc["channel"]       = (long)WiFi.channel();
+  doc["mac"]           = WiFi.macAddress();
+
+  JsonArray arrT = doc["hist_temp"].to<JsonArray>();
+  JsonArray arrH = doc["hist_hum"].to<JsonArray>();
+  for (uint8_t i = 0; i < histCountCopy; i++) {
+    arrT.add(histTempCopy[i]);
+    arrH.add(histHumCopy[i]);
   }
 
-  html += "<div class='card'><b>Cam bien phong ngu</b><br><br>"
-          "Nhiet do (BLE): " + (snap.ble_online ? String(snap.temperature, 1) + " &deg;C" : String("--.- &deg;C (Offline)")) + "<br>"
-          "Do am (BLE): " + (snap.ble_online ? String(snap.humidity, 1) + " %" : String("--.- %")) + "<br>"
-          "Anh sang: " + String(snap.light_lux) + " / 1000<br>"
-          "Goi ESP-NOW gan nhat: #" + String(snap.last_rx_seq) + "</div>";
-
-  html += "<div class='card'><b>Dieu khien cuc bo (ESP-NOW)</b><br><br>"
-          "Den phong ngu: <b>" + String(relayOn ? "DANG BAT" : "DANG TAT") + "</b><br>"
-          "<a href='/toggle'><button class='" + String(relayOn ? "off" : "on") + "'>"
-          + String(relayOn ? "Tat Den" : "Bat Den") + "</button></a>"
-          "<a href='/away'><button class='blue'>"
-          + String(snap.away_mode ? "Tat Away Mode" : "Bat Away Mode") + "</button></a></div>";
-
-  html += "<div class='card'><b>He thong & Mang</b><br>"
-          "<a href='/config'><button class='gray'>Cai dat Wi-Fi &amp; MQTT</button></a></div>"
-          "<small>FW: " FW_VERSION " | Kenh Wi-Fi: " + String((long)WiFi.channel()) +
-          " | MAC: " + WiFi.macAddress() + "</small></body></html>";
-
-  webServer.send(200, "text/html", html);
+  String out;
+  serializeJson(doc, out);
+  webServer.sendHeader("Cache-Control", "no-store");
+  webServer.send(200, "application/json", out);
 }
 
-void handleWebConfig() {
+void handleApiConfig() {
   AppConfig cfg = getConfigSnapshot();
-  bool hasSavedPass = (strlen(cfg.wifi_pass) > 0);
 
-  String html = "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-                "<title>Cai dat Wi-Fi &amp; MQTT</title>" + String(COMMON_CSS) + "</head><body>"
-                "<h2>Cai dat Wi-Fi &amp; MQTT (NVS)</h2>"
-                "<div class='card'><form method='POST' action='/save'>"
-                "<b>1. Mang Wi-Fi Router</b>"
-                "<label>Ten Wi-Fi (SSID)</label>"
-                "<input name='ssid' maxlength='32' required placeholder='Nhap ten Wi-Fi 2.4GHz' value='" + htmlEscape(cfg.wifi_ssid) + "'>"
-                "<label>Mat khau Wi-Fi</label>"
-                "<input name='pass' type='password' maxlength='64' placeholder='"
-                + String(hasSavedPass ? "De trong de giu mat khau cu" : "Nhap mat khau Wi-Fi") + "'>"
-                "<hr style='margin:16px 0;border:none;border-top:1px solid #e5e7eb'>"
-                "<b>2. Local MQTT Broker (Mosquitto)</b>"
-                "<label>Dia chi IP Broker</label>"
-                "<input name='mqtt_host' maxlength='64' placeholder='Vi du: 192.168.1.100' value='" + htmlEscape(cfg.mqtt_host) + "'>"
-                "<label>Cong (Port)</label>"
-                "<input name='mqtt_port' type='number' min='1' max='65535' value='" + String(cfg.mqtt_port) + "'>"
-                "<label>MQTT Username (tuy chon)</label>"
-                "<input name='mqtt_user' maxlength='32' placeholder='De trong neu khong dung' value='" + htmlEscape(cfg.mqtt_user) + "'>"
-                "<label>MQTT Password (tuy chon)</label>"
-                "<input name='mqtt_pass' type='password' maxlength='64' placeholder='De trong neu khong dung'>"
-                "<button type='submit' class='on'>Luu &amp; Ap dung</button>"
-                "<a href='/'><button type='button' class='gray'>Quay lai</button></a>"
-                "</form></div>";
+  JsonDocument doc;
+  doc["ssid"]      = cfg.wifi_ssid;
+  doc["has_pass"]  = (strlen(cfg.wifi_pass) > 0);
+  doc["mqtt_host"] = cfg.mqtt_host;
+  doc["mqtt_port"] = cfg.mqtt_port;
+  doc["mqtt_user"] = cfg.mqtt_user;
 
-  html += "<div class='card'><b>Khoi phuc mac dinh</b><br>"
-          "<small>Xoa Wi-Fi &amp; MQTT trong NVS va phat lai Wi-Fi " FALLBACK_AP_SSID ".</small><br>"
-          "<form method='POST' action='/reset' onsubmit=\"return confirm('Xoa toan bo cau hinh Wi-Fi va MQTT?');\">"
-          "<button type='submit' class='off'>Xoa cau hinh (Reset NVS)</button></form></div>"
-          "<small>Luu vao phan vung NVS - khong ghi de firmware.</small></body></html>";
+  String out;
+  serializeJson(doc, out);
+  webServer.sendHeader("Cache-Control", "no-store");
+  webServer.send(200, "application/json", out);
+}
 
-  webServer.send(200, "text/html", html);
+void handleApiToggle() {
+  bool canControl = false;
+  if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (sysState.espnow_online) {
+      canControl = true;
+      bool relayOn = (sysState.switch_mask & SW_BED_LIGHT_BIT) != 0;
+      if (relayOn) {
+        sysState.switch_mask &= ~SW_BED_LIGHT_BIT;
+      } else {
+        sysState.switch_mask |= SW_BED_LIGHT_BIT;
+        sysState.away_mode = false;
+      }
+    }
+    xSemaphoreGive(xStateMutex);
+  }
+
+  Serial.printf("[WEB] /api/toggle | espnow_online=%d\n", canControl ? 1 : 0);
+
+  if (canControl) {
+    queueEspNowAction(TX_CMD_WROOM);
+    queueEspNowAction(TX_SYNC_LVGL);
+    xSemaphoreGive(xMqttPubTelemetrySem);
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "application/json", "{\"ok\":true}");
+  } else {
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "application/json", "{\"ok\":false,\"error\":\"wroom_offline\"}");
+  }
+}
+
+void handleApiAway() {
+  bool canControl = false;
+  if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (sysState.espnow_online) {
+      canControl = true;
+      sysState.away_mode = !sysState.away_mode;
+      if (sysState.away_mode) {
+        sysState.switch_mask &= ~(SW_BED_LIGHT_BIT | SW_HALL_LIGHT_BIT);
+      }
+    }
+    xSemaphoreGive(xStateMutex);
+  }
+
+  Serial.printf("[WEB] /api/away | espnow_online=%d\n", canControl ? 1 : 0);
+
+  if (canControl) {
+    queueEspNowAction(TX_CMD_WROOM);
+    queueEspNowAction(TX_SYNC_LVGL);
+    xSemaphoreGive(xMqttPubTelemetrySem);
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "application/json", "{\"ok\":true}");
+  } else {
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "application/json", "{\"ok\":false,\"error\":\"wroom_offline\"}");
+  }
 }
 
 void handleWebSave() {
@@ -893,8 +966,7 @@ void handleWebSave() {
   String inMpas = webServer.arg("mqtt_pass");
 
   if (inSsid.length() == 0) {
-    webServer.send(400, "text/html",
-                   "<h3>Thieu ten Wi-Fi!</h3><a href='/config'>Quay lai</a>");
+    webServer.send(400, "text/plain", "Missing Wi-Fi SSID!");
     return;
   }
 
@@ -904,7 +976,6 @@ void handleWebSave() {
   strncpy(newCfg.wifi_ssid, inSsid.c_str(), sizeof(newCfg.wifi_ssid) - 1);
   newCfg.wifi_ssid[sizeof(newCfg.wifi_ssid) - 1] = '\0';
 
-  // Nếu người dùng nhập mật khẩu mới -> lưu mới; nếu để trống khi đổi SSID -> Wi-Fi mở (pass rỗng)
   if (inPass.length() > 0) {
     passChanged = (strcmp(oldCfg.wifi_pass, inPass.c_str()) != 0);
     strncpy(newCfg.wifi_pass, inPass.c_str(), sizeof(newCfg.wifi_pass) - 1);
@@ -930,86 +1001,25 @@ void handleWebSave() {
   }
 
   saveConfigToNvs(newCfg);
+  serveHtmlFile("/saved.html");
 
   bool needReboot = (ssidChanged || passChanged || WiFi.status() != WL_CONNECTED);
-
   if (needReboot) {
-    String html = "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                  "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-                  + String(COMMON_CSS) + "</head><body><div class='card'>"
-                  "<h3>Da luu cau hinh vao NVS!</h3>"
-                  "<p>YoloUNO dang khoi dong lai de ket noi vao Wi-Fi <b>" + htmlEscape(newCfg.wifi_ssid) + "</b>...</p>"
-                  "<p><small>Quan sat den NeoPixel: Do (khoi tao) &rarr; Xanh la (Wi-Fi + MQTT OK) hoac Tim (Wi-Fi OK, MQTT chua bat). "
-                  "Neu sai mat khau, den se quay lai Xanh duong.</small></p></div></body></html>";
-    webServer.send(200, "text/html", html);
     pendingReboot     = true;
-    pendingRebootAtMs = millis() + 1500;
+    pendingRebootAtMs = millis() + 2000;
   } else {
-    // Chỉ đổi IP/Port MQTT trên mạng LAN -> áp dụng ngay lập tức không cần khởi động lại
     mqttConfigDirty = true;
-    String html = "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                  "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-                  "<meta http-equiv='refresh' content='2;url=/'>"
-                  + String(COMMON_CSS) + "</head><body><div class='card'>"
-                  "<h3>Da cap nhat Broker MQTT!</h3>"
-                  "<p>Dang ket noi toi <b>" + htmlEscape(newCfg.mqtt_host) + ":" + String(newCfg.mqtt_port) + "</b>...</p>"
-                  "<a href='/'><button class='blue'>Ve trang chu</button></a></div></body></html>";
-    webServer.send(200, "text/html", html);
   }
 }
 
 void handleWebReset() {
   clearConfigNvs();
-  String html = "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-                + String(COMMON_CSS) + "</head><body><div class='card'>"
-                "<h3>Da xoa cau hinh NVS!</h3>"
-                "<p>YoloUNO dang khoi dong lai va phat Wi-Fi <b>" FALLBACK_AP_SSID "</b> (Pass: " FALLBACK_AP_PASS ").</p>"
-                "</div></body></html>";
-  webServer.send(200, "text/html", html);
+  serveHtmlFile("/saved.html");
   pendingReboot     = true;
-  pendingRebootAtMs = millis() + 1500;
-}
-
-void handleWebToggle() {
-  if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    bool relayOn = (sysState.switch_mask & SW_BED_LIGHT_BIT) != 0;
-    if (relayOn) {
-      sysState.switch_mask &= ~SW_BED_LIGHT_BIT;
-    } else {
-      sysState.switch_mask |= SW_BED_LIGHT_BIT;
-      sysState.away_mode = false;
-    }
-    xSemaphoreGive(xStateMutex);
-  }
-
-  queueEspNowAction(TX_CMD_WROOM);
-  queueEspNowAction(TX_SYNC_LVGL);
-  xSemaphoreGive(xMqttPubTelemetrySem);
-
-  webServer.sendHeader("Location", "/");
-  webServer.send(303);
-}
-
-void handleWebAway() {
-  if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    sysState.away_mode = !sysState.away_mode;
-    if (sysState.away_mode) {
-      sysState.switch_mask &= ~(SW_BED_LIGHT_BIT | SW_HALL_LIGHT_BIT);
-    }
-    xSemaphoreGive(xStateMutex);
-  }
-
-  queueEspNowAction(TX_CMD_WROOM);
-  queueEspNowAction(TX_SYNC_LVGL);
-  xSemaphoreGive(xMqttPubTelemetrySem);
-
-  webServer.sendHeader("Location", "/");
-  webServer.send(303);
+  pendingRebootAtMs = millis() + 2000;
 }
 
 void handleWebNotFound() {
-  // Tự động đẩy điện thoại về trang /config khi đang ở chế độ AP (Captive Portal)
   if (currentNetState == NET_WIFI_OFFLINE_AP) {
     webServer.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/config", true);
     webServer.send(302, "text/plain", "");
@@ -1018,28 +1028,26 @@ void handleWebNotFound() {
   webServer.send(404, "text/plain", "404 Not Found");
 }
 
-// ==================== TASK 3: WEB SERVER T07 + CAPTIVE PORTAL (CORE 1 - ƯU TIÊN 2) ====================
 void TaskWebServer(void* pvParameters) {
-  webServer.on("/",       HTTP_GET,  handleWebRoot);
-  webServer.on("/config", HTTP_GET,  handleWebConfig);
-  webServer.on("/save",   HTTP_POST, handleWebSave);
-  webServer.on("/reset",  HTTP_POST, handleWebReset);
-  webServer.on("/toggle", HTTP_GET,  handleWebToggle);
-  webServer.on("/away",   HTTP_GET,  handleWebAway);
+  webServer.on("/",           HTTP_GET,  handleWebRoot);
+  webServer.on("/config",     HTTP_GET,  handleWebConfig);
+  webServer.on("/api/status", HTTP_GET,  handleApiStatus);
+  webServer.on("/api/config", HTTP_GET,  handleApiConfig);
+  webServer.on("/api/toggle", HTTP_ANY,  handleApiToggle);
+  webServer.on("/api/away",   HTTP_ANY,  handleApiAway);
+  webServer.on("/save",       HTTP_POST, handleWebSave);
+  webServer.on("/reset",      HTTP_POST, handleWebReset);
   webServer.onNotFound(handleWebNotFound);
   webServer.begin();
-  Serial.println("[WEB T07] Local Web Server + /config dang chay tren cong 80!");
+  Serial.println("[WEB T07] Local Web Server (LittleFS) dang chay tren cong 80!");
 
   for (;;) {
-    // Tự bật/tắt Captive Portal DNS khớp với trạng thái AP của FSM
     if (currentNetState == NET_WIFI_OFFLINE_AP && !dnsRunning) {
       dnsServer.start(53, "*", WiFi.softAPIP());
       dnsRunning = true;
-      Serial.println("[DNS] Da bat Captive Portal cho SoftAP.");
     } else if (currentNetState != NET_WIFI_OFFLINE_AP && dnsRunning) {
       dnsServer.stop();
       dnsRunning = false;
-      Serial.println("[DNS] Da tat Captive Portal.");
     }
 
     if (dnsRunning) {
@@ -1048,9 +1056,7 @@ void TaskWebServer(void* pvParameters) {
 
     webServer.handleClient();
 
-    // Khởi động lại sạch sẽ sau khi đã gửi xong trang xác nhận cho trình duyệt
     if (pendingReboot && (int32_t)(millis() - pendingRebootAtMs) >= 0) {
-      Serial.println("[SYSTEM] Khoi dong lai de ap dung cau hinh mang moi...");
       ESP.restart();
     }
 
@@ -1084,7 +1090,7 @@ void initWiFiAndEspNow() {
     }
   } else {
     Serial.println("[WIFI] NVS chua co Wi-Fi -> Chuyen thang sang AP cau hinh.");
-    delay(400); // Giữ đèn Đỏ ngắn để dễ nhận biết pha khởi tạo
+    delay(400);
   }
 
   Serial.println("===================================================");
@@ -1112,18 +1118,24 @@ void setup() {
   xEspNowRxQueue       = xQueueCreate(8, sizeof(EspNowRxItem));
   xEspNowTxQueue       = xQueueCreate(8, sizeof(EspNowTxAction));
 
-  // Bật đèn ĐỎ (NET_INIT) ngay đầu quá trình khởi động
   currentNetState = NET_INIT;
   xTaskCreatePinnedToCore(TaskNeoPixelAndBootBtn, "NeoBoot", 2560, nullptr, 1, nullptr, 1);
 
   loadConfigFromNvs();
   initWiFiAndEspNow();
 
-  xTaskCreatePinnedToCore(TaskEspNow,      "EspNowHub", 4096, nullptr, 3, nullptr, 1);
-  xTaskCreatePinnedToCore(TaskWebServer,   "WebServer", 4096, nullptr, 2, nullptr, 1);
+  xTaskCreatePinnedToCore(TaskEspNow, "EspNowHub", 4096, nullptr, 3, nullptr, 1);
+
+  if (!LittleFS.begin(true)) {
+    Serial.println("[FS] Loi khoi tao LittleFS!");
+  } else {
+    Serial.println("[FS] Da mount LittleFS thanh cong!");
+  }
+
+  xTaskCreatePinnedToCore(TaskWebServer,   "WebServer", 8192, nullptr, 2, nullptr, 1);
   xTaskCreatePinnedToCore(TaskNetworkMqtt, "NetMqtt",   6144, nullptr, 1, nullptr, 0);
 
-  Serial.println("[SYSTEM] YoloUNO S3 Hub (FreeRTOS + FSM + NVS Config) san sang!");
+  Serial.println("[SYSTEM] YoloUNO S3 Hub (FreeRTOS + FSM + NVS + Chart) san sang!");
 }
 
 void loop() {
