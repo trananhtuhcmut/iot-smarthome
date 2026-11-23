@@ -1,0 +1,16 @@
+# Bỏ qua file build và thư viện tải về của PlatformIO (rất nặng)
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Cấu hình máy cá nhân & cổng COM riêng
+.vscode/
+local_ports.ini
+include/secrets.h
+
+# File rác của Python (dành cho phần Gateway/AI sau này)
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
