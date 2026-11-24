@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="slate">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SmartHome Local LAN Dashboard (T10)</title>
+  <script>
+    document.documentElement.setAttribute('data-theme', localStorage.getItem('hub_theme') || 'slate');
+  </script>
+  <style>
+    /* Theme 1: Rose & Cream */
+    :root, [data-theme="pastel"] {
+      --bg: #f7dfba;
+      --card: #FFFFFF;
+      --tile: #FFDDDD;
+      --border: #FFE8C4;
+      --title: #6e3b49;
+      --accent: #9e5468;
+      --ink: #3b232a;
+      --muted: #785861;
+      --shadow: 0 6px 18px -4px rgba(110, 59, 73, 0.08);
+      --btn-on-bg: #FFCED8;
+      --btn-on-text: #4a202c;
+      --btn-off-bg: #d97388;
+      --btn-off-text: #ffffff;
+      --btn-blue-bg: #FFE8C4;
+      --btn-blue-text: #4d3519;
+      --btn-gray-bg: #FFDDDD;
+      --btn-gray-text: #4a202c;
+      --pill-bg: #FFE8C4;
+      --pill-text: #4d3519;
+      --alert-bg: #FFCED8;
+      --alert-border: #d97388;
+      --alert-text: #4a202c;
+    }
+
+    /* Theme 2: Cyan & Grape */
+    [data-theme="cyan"] {
+      --bg: #dff4fc;
+      --card: #FFFFFF;
+      --tile: #EBEBEB;
+      --border: #CAD2C5;
+      --title: #52489C;
+      --accent: #84A98C;
+      --ink: #1e2438;
+      --muted: #556270;
+      --shadow: 0 6px 18px -4px rgba(30, 36, 56, 0.08);
+      --btn-on-bg: #59C3C3;
+      --btn-on-text: #10252b;
+      --btn-off-bg: #52489C;
+      --btn-off-text: #ffffff;
+      --btn-blue-bg: #84A98C;
+      --btn-blue-text: #ffffff;
+      --btn-gray-bg: #CAD2C5;
+      --btn-gray-text: #1e2438;
+      --pill-bg: #CAD2C5;
+      --pill-text: #1e2438;
+      --alert-bg: #52489C;
+      --alert-border: #59C3C3;
+      --alert-text: #ffffff;
+    }
+
+    /* Theme 3: Peach & Sky */
+    [data-theme="peach"] {
+      --bg: #e4f4e2;
+      --card: #FFFFFF;
+      --tile: #F4F0E2;
+      --border: #A6C8E2;
+      --title: #163047;
+      --accent: #619DC6;
+      --ink: #163047;
+      --muted: #526D82;
+      --shadow: 0 6px 18px -4px rgba(22, 48, 71, 0.08);
+      --btn-on-bg: #619DC6;
+      --btn-on-text: #ffffff;
+      --btn-off-bg: #F4BAA3;
+      --btn-off-text: #4a2016;
+      --btn-blue-bg: #A6C8E2;
+      --btn-blue-text: #163047;
+      --btn-gray-bg: #F4F0E2;
+      --btn-gray-text: #163047;
+      --pill-bg: #A6C8E2;
+      --pill-text: #163047;
+      --alert-bg: #F4BAA3;
+      --alert-border: #c96a46;
+      --alert-text: #4a2016;
+    }
+
+    /* Theme 4: Modern Slate (Light & Auto Dark Mode) */
+    [data-theme="slate"] {
+      --bg: #f1f5f9;
+      --card: #ffffff;
+      --tile: #f8fafc;
+      --border: #e2e8f0;
+      --title: #0f172a;
+      --accent: #2563eb;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --shadow: 0 4px 16px -2px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.04);
+      --btn-on-bg: #16a34a;
+      --btn-on-text: #ffffff;
+      --btn-off-bg: #dc2626;
+      --btn-off-text: #ffffff;
+      --btn-blue-bg: #2563eb;
+      --btn-blue-text: #ffffff;
+      --btn-gray-bg: #334155;
+      --btn-gray-text: #ffffff;
+      --pill-bg: #e2e8f0;
+      --pill-text: #0f172a;
+      --alert-bg: #fef2f2;
+      --alert-border: #dc2626;
+      --alert-text: #991b1b;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      [data-theme="slate"] {
+        --bg: #0b1120;
+        --card: #1e293b;
+        --tile: #0f172a;
+        --border: #334155;
+        --title: #f8fafc;
+        --accent: #60a5fa;
+        --ink: #f8fafc;
+        --muted: #94a3b8;
+        --shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+        --pill-bg: #334155;
+        --pill-text: #f8fafc;
+        --alert-bg: #450a0a;
+        --alert-border: #dc2626;
+        --alert-text: #fecaca;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      padding: 20px 16px 36px;
+      line-height: 1.5;
+      transition: background-color 0.25s ease, color 0.25s ease;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container {
+      max-width: 1120px;
+      margin: 0 auto;
+    }
+
+    /* Header & Theme Switcher */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--title);
+    }
+
+    .subtitle {
+      font-size: 12.5px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .theme-sw {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--card);
+      border: 1.5px solid var(--border);
+      padding: 4px 8px;
+      border-radius: 999px;
+    }
+
+    .sw-dot {
+      width: 16px;
+      height: 16px;
+      padding: 0;
+      border-radius: 50%;
+      border: 1.5px solid rgba(128, 128, 128, 0.35);
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .sw-dot:hover { transform: scale(1.12); }
+    .sw-dot.active {
+      box-shadow: 0 0 0 2px var(--card), 0 0 0 3.5px var(--title);
+      transform: scale(1.08);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 11px;
+      border-radius: 999px;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      background: #64748b;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    }
+
+    .badge::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #fff;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    /* Link Status Strip */
+    .conn-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .conn-chip {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      background: var(--card);
+      border: 1.5px solid var(--border);
+      border-radius: 12px;
+      padding: 9px 12px;
+      font-size: 12.5px;
+      font-weight: 600;
+      box-shadow: var(--shadow);
+      transition: background-color 0.25s ease, border-color 0.25s ease;
+    }
+
+    .conn-val {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 700;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #94a3b8;
+      flex-shrink: 0;
+    }
+
+    .dot.ok   { background: #16a34a; box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.2); }
+    .dot.err  { background: #dc2626; box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.2); }
+    .dot.warn { background: #d97706; box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.2); }
+
+    /* Alert Banner */
+    .alert-banner {
+      display: none;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      background: var(--alert-bg);
+      border: 1.5px solid var(--alert-border);
+      border-left: 5px solid var(--alert-border);
+      color: var(--alert-text);
+      padding: 13px 16px;
+      border-radius: 14px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow);
+      animation: alertPulse 1.6s infinite;
+    }
+
+    .alert-banner.show { display: flex; }
+
+    @keyframes alertPulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.25); }
+      50% { box-shadow: 0 0 16px 2px rgba(220, 38, 38, 0.35); }
+    }
+
+    .alert-title {
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .alert-title::before { content: "\26A0  "; }
+
+    .alert-desc {
+      font-size: 13px;
+      margin-top: 2px;
+      opacity: 0.92;
+    }
+
+    /* Layouts */
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+
+    /* Cards & Tiles */
+    .card {
+      background: var(--card);
+      border: 1.5px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+      transition: background-color 0.25s ease, border-color 0.25s ease;
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+
+    .card-title {
+      display: block;
+      font-size: 11.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+
+    .card-head .card-title { margin-bottom: 0; }
+
+    .sensor-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+
+    .sensor-label svg,
+    .tile-label svg {
+      stroke: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .metric {
+      font-size: 30px;
+      font-weight: 700;
+      color: var(--ink);
+      line-height: 1.2;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .unit {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-left: 4px;
+    }
+
+    .meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Progress bar (Light) */
+    .bar-track {
+      width: 100%;
+      height: 7px;
+      background: var(--tile);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 12px;
+    }
+
+    .bar-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      border-radius: 999px;
+      transition: width 0.3s ease;
+    }
+
+    /* Control Rows */
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: var(--tile);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+      transition: background-color 0.25s ease, border-color 0.25s ease;
+    }
+
+    .row-info strong {
+      display: block;
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .row-info span {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 1px;
+    }
+
+    .row-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .pill {
+      font-size: 11.5px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--pill-bg);
+      color: var(--pill-text);
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+
+    button:not(.sw-dot),
+    .btn-link {
+      padding: 10px 14px;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: transform 0.08s ease, filter 0.15s ease, opacity 0.2s ease, background-color 0.25s ease;
+    }
+
+    button:not(.sw-dot):hover:not(:disabled),
+    .btn-link:hover { filter: brightness(0.95); }
+
+    button:not(.sw-dot):active:not(:disabled),
+    .btn-link:active { transform: scale(0.98); }
+
+    .on   { background: var(--btn-on-bg);   color: var(--btn-on-text); }
+    .off  { background: var(--btn-off-bg);  color: var(--btn-off-text); }
+    .blue { background: var(--btn-blue-bg); color: var(--btn-blue-text); }
+    .gray {
+      background: var(--btn-gray-bg);
+      color: var(--btn-gray-text);
+      border-color: var(--border) !important;
+    }
+
+    /* Hub & AI Info Grid */
+    .hub-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+
+    .tile {
+      background: var(--tile);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 11px 12px;
+      transition: background-color 0.25s ease, border-color 0.25s ease;
+    }
+
+    .tile-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    .tile strong {
+      display: block;
+      font-size: 14.5px;
+      font-weight: 700;
+      color: var(--ink);
+      font-variant-numeric: tabular-nums;
+      word-break: break-word;
+    }
+
+    /* Live Camera */
+    .cam-card { margin-bottom: 14px; }
+
+    .cam-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--pill-bg);
+      color: var(--pill-text);
+    }
+
+    .cam-box {
+      text-align: center;
+      background: var(--tile);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+      min-height: 240px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #ai-stream {
+      max-width: 100%;
+      max-height: 440px;
+      display: none;
+    }
+
+    .cam-fallback {
+      color: var(--muted);
+      padding: 24px;
+      font-size: 13px;
+    }
+
+    .cam-fallback code {
+      background: var(--card);
+      border: 1px solid var(--border);
+      padding: 2px 6px;
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      color: var(--ink);
+    }
+
+    /* Chart & Logs */
+    .legend {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .leg-item { display: inline-flex; align-items: center; gap: 5px; }
+    .leg-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+    .chart-wrap {
+      background: var(--tile);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 8px 6px;
+    }
+
+    #chart {
+      width: 100%;
+      height: 220px;
+      display: block;
+    }
+
+    .log-box {
+      height: 236px;
+      overflow-y: auto;
+      background: var(--tile);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 12px;
+      color: var(--ink);
+    }
+
+    .log-empty {
+      color: var(--muted);
+      font-family: inherit;
+      padding: 8px 0;
+    }
+
+    .log-item {
+      padding: 5px 0;
+      border-bottom: 1px dashed var(--border);
+      line-height: 1.4;
+    }
+
+    .log-item:last-child { border-bottom: none; }
+    .log-time { color: var(--muted); margin-right: 6px; }
+    .log-src { color: var(--accent); font-weight: 700; margin-right: 6px; }
+    .log-src.ALERT { color: #dc2626; }
+
+    .footer {
+      display: block;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 16px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    @media (max-width: 600px) {
+      .grid-2 { grid-template-columns: 1fr; }
+      .row { flex-direction: column; align-items: flex-start; }
+      .row-actions { width: 100%; justify-content: space-between; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <div>
+        <h1>SmartHome Local LAN Dashboard</h1>
+        <div class="subtitle">Layer 2 Gateway UI (T10) • 100% Offline LAN Operation</div>
+      </div>
+      <div class="header-right">
+        <div class="theme-sw" title="Switch color palette">
+          <button type="button" class="sw-dot" data-t="slate" onclick="setTheme('slate')" style="background:linear-gradient(135deg,#f1f5f9 50%,#0b1120 50%)" aria-label="Modern Slate"></button>
+          <button type="button" class="sw-dot" data-t="pastel" onclick="setTheme('pastel')" style="background:linear-gradient(135deg,#FFCED8 50%,#FFE8C4 50%)" aria-label="Rose & Cream"></button>
+          <button type="button" class="sw-dot" data-t="cyan" onclick="setTheme('cyan')" style="background:linear-gradient(135deg,#59C3C3 50%,#52489C 50%)" aria-label="Cyan & Grape"></button>
+          <button type="button" class="sw-dot" data-t="peach" onclick="setTheme('peach')" style="background:linear-gradient(135deg,#619DC6 50%,#F4BAA3 50%)" aria-label="Peach & Sky"></button>
+        </div>
+        <div id="ws-badge" class="badge">Connecting...</div>
+      </div>
+    </div>
+
+    <!-- Link & Cloud Status Bar -->
+    <div class="conn-bar">
+      <div class="conn-chip">
+        <span>YoloUNO Hub</span>
+        <span class="conn-val"><span id="dot-hub" class="dot err"></span><span id="txt-hub">Offline</span></span>
+      </div>
+      <div class="conn-chip">
+        <span>ESP-NOW</span>
+        <span class="conn-val"><span id="dot-espnow" class="dot err"></span><span id="txt-espnow">Offline</span></span>
+      </div>
+      <div class="conn-chip">
+        <span>BLE (DHT11)</span>
+        <span class="conn-val"><span id="dot-ble" class="dot warn"></span><span id="txt-ble">Offline</span></span>
+      </div>
+      <div class="conn-chip">
+        <span>CoreIOT Cloud</span>
+        <span class="conn-val"><span id="dot-cloud" class="dot warn"></span><span id="txt-cloud">Offline (SQLite: 0)</span></span>
+      </div>
+    </div>
+
+    <!-- Emergency Edge AI Alert Banner -->
+    <div id="alert-banner" class="alert-banner">
+      <div>
+        <div class="alert-title" id="alert-title">SECURITY ALERT</div>
+        <div class="alert-desc" id="alert-desc">--</div>
+      </div>
+      <button type="button" class="off" onclick="clearAlert()">Acknowledge / Clear Alert</button>
+    </div>
+
+    <!-- Row 1: 3 Sensor Cards -->
+    <div class="grid-3">
+      <div class="card">
+        <div class="sensor-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>
+          <span>Temperature (BLE ESP32-C3)</span>
+        </div>
+        <div class="metric"><span id="val-temp">--.-</span><span class="unit">°C</span></div>
+        <div class="meta"><span>DHT11 Sensor</span><span id="ble-status-txt">BLE: Waiting</span></div>
+      </div>
+
+      <div class="card">
+        <div class="sensor-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+          <span>Humidity (BLE ESP32-C3)</span>
+        </div>
+        <div class="metric"><span id="val-hum">--.-</span><span class="unit">%RH</span></div>
+        <div class="meta"><span>Via BLE (T03)</span><span id="last-upd">No data yet</span></div>
+      </div>
+
+      <div class="card">
+        <div class="sensor-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <span>Light Level (WROOM)</span>
+        </div>
+        <div class="metric"><span id="val-light">--</span><span class="unit">/ 1000</span></div>
+        <div class="bar-track"><div id="light-bar" class="bar-fill"></div></div>
+      </div>
+    </div>
+
+    <!-- Row 2: Local Control & Hub / Edge AI Status -->
+    <div class="grid-2">
+      <div class="card">
+        <b class="card-title">Local Device Control</b>
+
+        <div class="row">
+          <div class="row-info">
+            <strong>Bedroom Light (Relay)</strong>
+            <span>Key: sw1_bed_light • Via ESP-NOW</span>
+          </div>
+          <div class="row-actions">
+            <span id="pill-light" class="pill">OFF</span>
+            <button type="button" id="btn-light" class="on" onclick="toggleLight()">Turn On</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="row-info">
+            <strong>Away Mode</strong>
+            <span>Auto-turns off light &amp; arms AI intrusion detection</span>
+          </div>
+          <div class="row-actions">
+            <span id="pill-away" class="pill">HOME</span>
+            <button type="button" id="btn-away" class="blue" onclick="toggleAway()">Enable Away</button>
+          </div>
+        </div>
+
+        <div class="btn-group">
+          <button type="button" class="gray" onclick="sendTestAlert()">Simulate AI Alert (Test)</button>
+          <a id="hub-web-link" href="#" target="_blank" class="btn-link blue" style="display:none;">Open YoloUNO Hub (T07) ↗</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <b class="card-title">Hub (T14 OTA) &amp; Edge AI (T09 / N04)</b>
+        <div class="hub-grid">
+          <div class="tile">
+            <div class="tile-label">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              <span>Firmware (OTA T14)</span>
+            </div>
+            <strong id="hub-fw">--</strong>
+          </div>
+          <div class="tile">
+            <div class="tile-label">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+              <span>YoloUNO IP / Ch</span>
+            </div>
+            <strong id="hub-ip">--</strong>
+          </div>
+          <div class="tile">
+            <div class="tile-label">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+              <span>Wi-Fi Signal (RSSI)</span>
+            </div>
+            <strong id="hub-rssi">-- dBm</strong>
+          </div>
+          <div class="tile">
+            <div class="tile-label">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+              <span>SQLite Queue (T08)</span>
+            </div>
+            <strong id="gw-queue">0 packets</strong>
+          </div>
+          <div class="tile">
+            <div class="tile-label">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <span>Edge AI Event</span>
+            </div>
+            <strong id="ai-event">none (0%)</strong>
+          </div>
+          <div class="tile">
+            <div class="tile-label">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+              <span>GPU Speed / Load</span>
+            </div>
+            <strong id="ai-perf">0.0 FPS | 0%</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 2.5: Edge AI Live Camera -->
+    <div class="card cam-card">
+      <div class="card-head">
+        <b class="card-title">Live Camera Edge AI (GPU RTX 4050 • Port 8001)</b>
+        <span class="cam-status">
+          <span id="dot-cam" class="dot warn"></span>
+          <span id="cam-status">Connecting video stream...</span>
+        </span>
+      </div>
+      <div class="cam-box">
+        <img id="ai-stream" alt="Edge AI Live Stream" />
+        <div id="cam-fallback" class="cam-fallback">
+          Camera stream unavailable (start <code>python edge_ai/ai_worker.py</code>).
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 3: Offline Chart & Realtime System Event Log -->
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-head">
+          <b class="card-title">Temp &amp; Humidity Trend (Offline Canvas)</b>
+          <div class="legend">
+            <span class="leg-item"><span class="leg-dot" style="background:#ef4444"></span>Temp (°C)</span>
+            <span class="leg-item"><span class="leg-dot" style="background:#3b82f6"></span>Humi (%)</span>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chart"></canvas>
+        </div>
+      </div>
+
+      <div class="card">
+        <b class="card-title">System Event Log (Realtime)</b>
+        <div id="log-box" class="log-box">
+          <div class="log-empty">Waiting for system events...</div>
+        </div>
+      </div>
+    </div>
+
+    <small class="footer">SmartHome Local LAN Gateway (T10) • Theme synchronized across Hub &amp; Gateway UI</small>
+  </div>
+
+  <script>
+    let currentLight = false;
+    let currentAway = false;
+    let lastHistory = [];
+    let ws = null;
+
+    function setTheme(t) {
+      document.documentElement.setAttribute('data-theme', t);
+      localStorage.setItem('hub_theme', t);
+      document.querySelectorAll('.sw-dot').forEach(b => b.classList.toggle('active', b.dataset.t === t));
+      drawChart(lastHistory);
+    }
+
+    function setDot(id, status) {
+      const el = document.getElementById(id);
+      if (el) el.className = 'dot ' + status;
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function connectWS() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${proto}://${location.host}/ws`);
+      const wsBadge = document.getElementById('ws-badge');
+
+      ws.onopen = () => {
+        wsBadge.textContent = 'WS Live';
+        wsBadge.style.background = '#16a34a';
+      };
+
+      ws.onclose = () => {
+        wsBadge.textContent = 'Reconnecting...';
+        wsBadge.style.background = '#dc2626';
+        setTimeout(connectWS, 2000);
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'state') {
+            renderState(msg.state, msg.history || [], msg.logs || []);
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      };
+    }
+
+    function renderState(s, history, logs) {
+      // 1. Overall link & cloud status
+      setDot('dot-hub', s.hub.online ? 'ok' : 'err');
+      document.getElementById('txt-hub').textContent = s.hub.online ? 'Online' : 'Offline';
+
+      setDot('dot-espnow', s.bedroom.espnow_online ? 'ok' : 'err');
+      document.getElementById('txt-espnow').textContent = s.bedroom.espnow_online ? 'Online' : 'Offline';
+
+      setDot('dot-ble', s.bedroom.ble_online ? 'ok' : 'warn');
+      document.getElementById('txt-ble').textContent = s.bedroom.ble_online ? 'Online' : 'Offline';
+
+      const cloudOn = !!s.gateway.cloud_online;
+      const qSize = Number(s.gateway.queue_size || 0);
+      setDot('dot-cloud', cloudOn ? 'ok' : 'warn');
+      document.getElementById('txt-cloud').textContent = cloudOn
+        ? `Online (Queue: ${qSize})`
+        : `Offline (SQLite: ${qSize})`;
+      document.getElementById('gw-queue').textContent = `${qSize} ${qSize === 1 ? 'packet' : 'packets'}`;
+
+      // 2. Sensors
+      document.getElementById('val-temp').textContent =
+        s.bedroom.temperature !== null && s.bedroom.temperature !== undefined
+          ? Number(s.bedroom.temperature).toFixed(1)
+          : '--.-';
+      document.getElementById('val-hum').textContent =
+        s.bedroom.humidity !== null && s.bedroom.humidity !== undefined
+          ? Number(s.bedroom.humidity).toFixed(1)
+          : '--.-';
+      document.getElementById('ble-status-txt').textContent =
+        s.bedroom.ble_online ? 'BLE: Connected' : 'BLE: Disconnected';
+
+      const light = s.bedroom.light;
+      document.getElementById('val-light').textContent = light !== null && light !== undefined ? light : '--';
+      document.getElementById('light-bar').style.width =
+        light !== null && light !== undefined ? `${Math.min(100, Math.max(0, light / 10))}%` : '0%';
+
+      if (s.bedroom.last_update > 0) {
+        const dt = new Date(s.bedroom.last_update * 1000);
+        document.getElementById('last-upd').textContent = `Updated: ${dt.toLocaleTimeString()}`;
+      }
+
+      // 3. Controls
+      currentLight = !!s.bedroom.sw1_bed_light;
+      document.getElementById('pill-light').textContent = currentLight ? 'ON' : 'OFF';
+      const btnLight = document.getElementById('btn-light');
+      btnLight.textContent = currentLight ? 'Turn Off' : 'Turn On';
+      btnLight.className = currentLight ? 'off' : 'on';
+
+      currentAway = !!s.bedroom.away_mode;
+      document.getElementById('pill-away').textContent = currentAway ? 'AWAY' : 'HOME';
+      const btnAway = document.getElementById('btn-away');
+      btnAway.textContent = currentAway ? 'Disable Away' : 'Enable Away';
+      btnAway.className = currentAway ? 'off' : 'blue';
+
+      // 4. Hub & Edge AI metrics
+      document.getElementById('hub-fw').textContent = s.hub.fw_version || '--';
+      document.getElementById('hub-ip').textContent = s.hub.ip ? `${s.hub.ip} (Ch ${s.hub.wifi_channel})` : '--';
+      document.getElementById('hub-rssi').textContent = `${s.hub.rssi || 0} dBm`;
+
+      const hubLink = document.getElementById('hub-web-link');
+      if (s.hub.ip) {
+        hubLink.href = `http://${s.hub.ip}`;
+        hubLink.style.display = 'inline-flex';
+      } else {
+        hubLink.style.display = 'none';
+      }
+
+      document.getElementById('ai-event').textContent =
+        `${s.ai.ai_event || 'none'} (${Math.round((s.ai.ai_confidence || 0) * 100)}%)`;
+      document.getElementById('ai-perf').textContent =
+        `${Number(s.ai.fps || 0).toFixed(1)} FPS | ${Number(s.ai.gpu_util || 0).toFixed(0)}%`;
+
+      // 5. Alert banner
+      const banner = document.getElementById('alert-banner');
+      if (s.alert && s.alert.active) {
+        banner.classList.add('show');
+        document.getElementById('alert-title').textContent =
+          `ALERT [${String(s.alert.event || 'SECURITY').toUpperCase()}] • Confidence: ${Math.round((s.alert.confidence || 0) * 100)}%`;
+        document.getElementById('alert-desc').textContent = s.alert.message || 'Security alert triggered.';
+      } else {
+        banner.classList.remove('show');
+      }
+
+      // 6. Chart & Logs
+      lastHistory = history;
+      drawChart(history);
+      renderLogs(logs);
+    }
+
+    // Dual-axis high-DPI chart matching YoloUNO Local Hub (new.html)
+    function drawChart(history) {
+      const canvas = document.getElementById('chart');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+
+      canvas.width = Math.round(rect.width * dpr);
+      canvas.height = Math.round(rect.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      const W = rect.width;
+      const H = rect.height;
+      const cs = getComputedStyle(document.documentElement);
+      const borderColor = cs.getPropertyValue('--border').trim() || '#cbd5e1';
+      const mutedColor = cs.getPropertyValue('--muted').trim() || '#64748b';
+
+      ctx.clearRect(0, 0, W, H);
+
+      const n = history.length;
+      if (n < 2) {
+        ctx.fillStyle = mutedColor;
+        ctx.font = '600 12.5px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Waiting for sensor samples...', W / 2, H / 2);
+        return;
+      }
+
+      const temps = history.map(p => Number(p.temp));
+      const hums = history.map(p => Number(p.hum));
+
+      const padL = 36, padR = 36, padT = 14, padB = 22;
+      const plotW = W - padL - padR;
+      const plotH = H - padT - padB;
+
+      let tMin = Math.floor(Math.min(...temps) - 2);
+      let tMax = Math.ceil(Math.max(...temps) + 2);
+      if (tMax - tMin < 6) { tMin -= 2; tMax += 2; }
+
+      let hMin = Math.max(0, Math.floor((Math.min(...hums) - 5) / 5) * 5);
+      let hMax = Math.min(100, Math.ceil((Math.max(...hums) + 5) / 5) * 5);
+      if (hMax - hMin < 15) {
+        hMin = Math.max(0, hMin - 5);
+        hMax = Math.min(100, hMax + 5);
+      }
+
+      const steps = 3;
+      ctx.font = '600 10.5px system-ui, sans-serif';
+      ctx.textBaseline = 'middle';
+      for (let i = 0; i <= steps; i++) {
+        const y = padT + (plotH * i) / steps;
+
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(W - padR, y);
+        ctx.stroke();
+
+        const tVal = tMax - ((tMax - tMin) * i) / steps;
+        ctx.fillStyle = '#ef4444';
+        ctx.textAlign = 'right';
+        ctx.fillText(tVal.toFixed(0) + '°', padL - 6, y);
+
+        const hVal = hMax - ((hMax - hMin) * i) / steps;
+        ctx.fillStyle = '#3b82f6';
+        ctx.textAlign = 'left';
+        ctx.fillText(hVal.toFixed(0) + '%', W - padR + 6, y);
+      }
+
+      const xAt = (i) => padL + (plotW * i) / (n - 1);
+      const yTemp = (v) => padT + plotH * (1 - (v - tMin) / (tMax - tMin));
+      const yHum = (v) => padT + plotH * (1 - (v - hMin) / (hMax - hMin));
+
+      function plotSeries(values, yFn, strokeHex, fillRgba) {
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+          const x = xAt(i), y = yFn(values[i]);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = strokeHex;
+        ctx.lineWidth = 2.2;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.stroke();
+
+        ctx.lineTo(xAt(n - 1), padT + plotH);
+        ctx.lineTo(xAt(0), padT + plotH);
+        ctx.closePath();
+        ctx.fillStyle = fillRgba;
+        ctx.fill();
+
+        const lx = xAt(n - 1), ly = yFn(values[n - 1]);
+        ctx.beginPath();
+        ctx.arc(lx, ly, 3.6, 0, Math.PI * 2);
+        ctx.fillStyle = strokeHex;
+        ctx.fill();
+      }
+
+      plotSeries(hums, yHum, '#3b82f6', 'rgba(59, 130, 246, 0.10)');
+      plotSeries(temps, yTemp, '#ef4444', 'rgba(239, 68, 68, 0.10)');
+
+      ctx.fillStyle = mutedColor;
+      ctx.font = '600 10px system-ui, sans-serif';
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+      ctx.fillText(history[0].t || 'Older', padL, padT + plotH + 6);
+      ctx.textAlign = 'right';
+      ctx.fillText(`${history[n - 1].t || 'Now'} (${n} pts)`, W - padR, padT + plotH + 6);
+    }
+
+    function renderLogs(logs) {
+      const box = document.getElementById('log-box');
+      if (!logs.length) return;
+      box.innerHTML = logs.map(l =>
+        `<div class="log-item"><span class="log-time">[${escapeHtml(l.time)}]</span><span class="log-src ${escapeHtml(l.source)}">${escapeHtml(l.source)}</span>${escapeHtml(l.text)}</div>`
+      ).join('');
+    }
+
+    async function toggleLight() {
+      await fetch('/api/cmd/switch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ switch: 'sw1_bed_light', state: !currentLight }),
+      });
+    }
+
+    async function toggleAway() {
+      await fetch('/api/cmd/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ away_mode: !currentAway }),
+      });
+    }
+
+    async function clearAlert() {
+      await fetch('/api/cmd/clear_alert', { method: 'POST' });
+    }
+
+    async function sendTestAlert() {
+      await fetch('/api/test/alert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          alert_code: 1,
+          event: 'intrusion',
+          confidence: 0.93,
+          message: 'ALERT: INTRUDER DETECTED (TEST)',
+        }),
+      });
+    }
+
+    // Automatically resolve Gateway host (127.0.0.1 on PC or 192.168.x.x on mobile)
+    const streamImg = document.getElementById('ai-stream');
+    const camFallback = document.getElementById('cam-fallback');
+    const camStatus = document.getElementById('cam-status');
+    const streamUrl = `http://${location.hostname}:8001/video_feed`;
+
+    streamImg.onload = () => {
+      streamImg.style.display = 'block';
+      camFallback.style.display = 'none';
+      setDot('dot-cam', 'ok');
+      camStatus.textContent = 'LIVE • MJPEG Stream';
+    };
+
+    streamImg.onerror = () => {
+      streamImg.style.display = 'none';
+      camFallback.style.display = 'block';
+      setDot('dot-cam', 'warn');
+      camStatus.textContent = 'Camera Offline';
+    };
+
+    streamImg.src = streamUrl;
+
+    setTheme(localStorage.getItem('hub_theme') || 'slate');
+    window.addEventListener('resize', () => drawChart(lastHistory));
+    connectWS();
+  </script>
+</body>
+</html>
