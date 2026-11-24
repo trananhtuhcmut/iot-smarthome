@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+edge_ai/datasets/
+edge_ai/runs/
+edge_ai/weights/*.pt
+!edge_ai/weights/fire_best.pt
