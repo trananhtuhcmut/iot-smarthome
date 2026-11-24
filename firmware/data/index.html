@@ -141,7 +141,6 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    /* Header & Theme Switcher */
     .header {
       display: flex;
       align-items: center;
@@ -217,7 +216,6 @@
       50% { opacity: 0.4; }
     }
 
-    /* Alert Banner */
     .alert {
       display: none;
       background: var(--alert-bg);
@@ -232,7 +230,6 @@
 
     .alert::before { content: "\26A0  "; }
 
-    /* Cards */
     .card {
       background: var(--card);
       border: 1.5px solid var(--border);
@@ -262,11 +259,8 @@
       margin-bottom: 12px;
     }
 
-    .card-head .card-title {
-      margin-bottom: 0;
-    }
+    .card-head .card-title { margin-bottom: 0; }
 
-    /* Link Status Chips (ESP-NOW & BLE) */
     .conn-bar {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -304,7 +298,6 @@
     .dot.ok  { background: #16a34a; box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.2); }
     .dot.err { background: #dc2626; box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.2); }
 
-    /* Sensor 2x2 Grid */
     .grid {
       display: grid;
       grid-template-columns: repeat(2, 1fr);
@@ -339,7 +332,6 @@
       font-variant-numeric: tabular-nums;
     }
 
-    /* Chart */
     .legend {
       display: inline-flex;
       align-items: center;
@@ -349,17 +341,8 @@
       color: var(--muted);
     }
 
-    .leg-item {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-    }
-
-    .leg-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-    }
+    .leg-item { display: inline-flex; align-items: center; gap: 5px; }
+    .leg-dot { width: 8px; height: 8px; border-radius: 50%; }
 
     .chart-wrap {
       background: var(--tile);
@@ -368,13 +351,8 @@
       padding: 10px 8px 6px;
     }
 
-    #envChart {
-      width: 100%;
-      height: 185px;
-      display: block;
-    }
+    #envChart { width: 100%; height: 185px; display: block; }
 
-    /* Control Row */
     .row {
       display: flex;
       align-items: center;
@@ -398,7 +376,6 @@
       letter-spacing: 0.04em;
     }
 
-    /* Buttons */
     .btn-row {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -451,14 +428,14 @@
         <button type="button" class="sw-dot" data-t="cyan" onclick="setTheme('cyan')" style="background:linear-gradient(135deg,#59C3C3 50%,#52489C 50%)" aria-label="Cyan & Grape"></button>
         <button type="button" class="sw-dot" data-t="peach" onclick="setTheme('peach')" style="background:linear-gradient(135deg,#619DC6 50%,#F4BAA3 50%)" aria-label="Peach & Sky"></button>
       </div>
-      <div id="netBadge" class="badge" style="background:#64748b">Loading...</div>
+      <div id="netBadge" class="badge" style="background:#64748b">Connecting...</div>
     </div>
   </div>
 
   <div id="alertBox" class="alert"></div>
 
   <div class="card">
-    <b class="card-title">Bedroom Sensors & Links</b>
+    <b class="card-title">Bedroom Sensors &amp; Links</b>
 
     <div class="conn-bar">
       <div class="conn-chip">
@@ -508,7 +485,7 @@
 
   <div class="card">
     <div class="card-head">
-      <b class="card-title">Temp & Humidity Trend</b>
+      <b class="card-title">Temp &amp; Humidity Trend</b>
       <div class="legend">
         <span class="leg-item"><span class="leg-dot" style="background:#ef4444"></span>Temp (°C)</span>
         <span class="leg-item"><span class="leg-dot" style="background:#3b82f6"></span>Humi (%)</span>
@@ -523,28 +500,35 @@
     <b class="card-title">Local Control (ESP-NOW)</b>
     <div class="row"><span>Bedroom Light</span><strong id="relayText">OFFLINE</strong></div>
     <div class="btn-row">
-      <button id="btnToggle" class="on" onclick="sendAction('/api/toggle')" disabled>Turn On Light</button>
-      <button id="btnAway" class="blue" onclick="sendAction('/api/away')" disabled>Enable Away Mode</button>
+      <button id="btnToggle" class="on" onclick="sendCmd('toggle')" disabled>Turn On Light</button>
+      <button id="btnAway" class="blue" onclick="sendCmd('away')" disabled>Enable Away Mode</button>
     </div>
   </div>
 
   <div class="card">
-    <b class="card-title">System & Network</b>
-    <a href="/config"><button class="gray">Wi-Fi & MQTT Settings</button></a>
+    <b class="card-title">System &amp; Network</b>
+    <a href="/config"><button class="gray">Wi-Fi &amp; MQTT Settings</button></a>
   </div>
 
-  <small id="metaInfo">FW: ---</small>
+  <small id="metaInfo">FW: --- | WS: Connecting...</small>
 
   <script>
     let lastHistTemp = [];
     let lastHistHum  = [];
-    let isBusyAction = false;
+    let ws           = null;
+    let wsConnected  = false;
+    let lastMetaBase = 'FW: ---';
 
     function setTheme(t) {
       document.documentElement.setAttribute('data-theme', t);
       localStorage.setItem('hub_theme', t);
       document.querySelectorAll('.sw-dot').forEach(b => b.classList.toggle('active', b.dataset.t === t));
       drawChart(lastHistTemp, lastHistHum);
+    }
+
+    function updateMetaFooter() {
+      document.getElementById('metaInfo').textContent =
+        lastMetaBase + ' | ' + (wsConnected ? 'WS: Live' : 'WS: Reconnecting');
     }
 
     function drawChart(temps, hums) {
@@ -581,7 +565,6 @@
       const plotW = W - padL - padR;
       const plotH = H - padT - padB;
 
-      // Auto-scale mềm cho trục Nhiệt độ (trái) và Độ ẩm (phải)
       let tMin = Math.floor(Math.min(...temps) - 2);
       let tMax = Math.ceil(Math.max(...temps) + 2);
       if (tMax - tMin < 6) { tMin -= 2; tMax += 2; }
@@ -593,7 +576,6 @@
         hMax = Math.min(100, hMax + 5);
       }
 
-      // Vẽ lưới ngang & nhãn 2 trục Y
       const steps = 3;
       ctx.font = '600 10.5px system-ui, sans-serif';
       ctx.textBaseline = 'middle';
@@ -618,11 +600,10 @@
         ctx.fillText(hVal.toFixed(0) + '%', W - padR + 5, y);
       }
 
-      const xAt = (i) => padL + (plotW * i) / (n - 1);
+      const xAt   = (i) => padL + (plotW * i) / (n - 1);
       const yTemp = (v) => padT + plotH * (1 - (v - tMin) / (tMax - tMin));
       const yHum  = (v) => padT + plotH * (1 - (v - hMin) / (hMax - hMin));
 
-      // Hàm vẽ 1 đường kèm vùng phủ mờ nhẹ
       function plotSeries(values, yFn, strokeHex, fillRgba) {
         ctx.beginPath();
         for (let i = 0; i < n; i++) {
@@ -636,14 +617,12 @@
         ctx.lineCap = 'round';
         ctx.stroke();
 
-        // Đổ bóng nhẹ phía dưới
         ctx.lineTo(xAt(n - 1), padT + plotH);
         ctx.lineTo(xAt(0), padT + plotH);
         ctx.closePath();
         ctx.fillStyle = fillRgba;
         ctx.fill();
 
-        // Chấm tròn ở điểm mới nhất
         const lx = xAt(n - 1), ly = yFn(values[n - 1]);
         ctx.beginPath();
         ctx.arc(lx, ly, 3.6, 0, Math.PI * 2);
@@ -654,7 +633,6 @@
       plotSeries(hums,  yHum,  '#3b82f6', 'rgba(59, 130, 246, 0.10)');
       plotSeries(temps, yTemp, '#ef4444', 'rgba(239, 68, 68, 0.10)');
 
-      // Nhãn trục X gọn phía dưới
       ctx.fillStyle = mutedColor;
       ctx.font = '600 10px system-ui, sans-serif';
       ctx.textBaseline = 'top';
@@ -671,86 +649,117 @@
       txt.textContent = isOnline ? 'Online' : 'Offline';
     }
 
-    async function refreshStatus() {
+    function applyStatus(d) {
+      const badge = document.getElementById('netBadge');
+      badge.textContent = d.net_banner;
+      badge.style.background = d.badge_color;
+
+      const alertBox = document.getElementById('alertBox');
+      if (d.alert_code && d.alert_code !== 0) {
+        alertBox.textContent = 'ALERT: ' + d.alert_msg;
+        alertBox.style.display = 'block';
+      } else {
+        alertBox.style.display = 'none';
+      }
+
+      const espNowOnline = !!d.espnow_online;
+      const bleOnline    = espNowOnline && !!d.ble_online;
+
+      setLinkStatus('espNowDot', 'espNowTxt', espNowOnline);
+      setLinkStatus('bleDot',    'bleTxt',    bleOnline);
+
+      document.getElementById('temp').textContent  = bleOnline ? (d.temperature.toFixed(1) + ' °C') : '--.- °C';
+      document.getElementById('hum').textContent   = bleOnline ? (d.humidity.toFixed(1) + ' %')     : '--.- %';
+      document.getElementById('light').textContent = espNowOnline ? (d.light_lux + ' / 1000')       : '-- / 1000';
+      document.getElementById('seq').textContent   = espNowOnline ? ('#' + d.last_rx_seq)           : 'Offline';
+
+      const btnToggle = document.getElementById('btnToggle');
+      const btnAway   = document.getElementById('btnAway');
+
+      if (!espNowOnline) {
+        document.getElementById('relayText').textContent = 'OFFLINE';
+        btnToggle.disabled = true;
+        btnAway.disabled   = true;
+      } else {
+        document.getElementById('relayText').textContent = d.relay_on ? 'ON' : 'OFF';
+        btnToggle.textContent = d.relay_on ? 'Turn Off Light' : 'Turn On Light';
+        btnToggle.className   = d.relay_on ? 'off' : 'on';
+        btnAway.textContent   = d.away_mode ? 'Disable Away Mode' : 'Enable Away Mode';
+        btnToggle.disabled    = false;
+        btnAway.disabled      = false;
+      }
+
+      if (Array.isArray(d.hist_temp) && Array.isArray(d.hist_hum)) {
+        lastHistTemp = d.hist_temp;
+        lastHistHum  = d.hist_hum;
+        drawChart(lastHistTemp, lastHistHum);
+      }
+
+      lastMetaBase = `FW: ${d.fw_version} | Ch: ${d.channel} | MAC: ${d.mac}`;
+      updateMetaFooter();
+    }
+
+    async function fetchFallbackStatus() {
       try {
         const res = await fetch('/api/status', { cache: 'no-store' });
-        if (!res.ok) return;
-        const d = await res.json();
-
-        const badge = document.getElementById('netBadge');
-        badge.textContent = d.net_banner;
-        badge.style.background = d.badge_color;
-
-        const alertBox = document.getElementById('alertBox');
-        if (d.alert_code && d.alert_code !== 0) {
-          alertBox.textContent = 'ALERT: ' + d.alert_msg;
-          alertBox.style.display = 'block';
-        } else {
-          alertBox.style.display = 'none';
-        }
-
-        const espNowOnline = !!d.espnow_online;
-        const bleOnline    = espNowOnline && !!d.ble_online;
-
-        setLinkStatus('espNowDot', 'espNowTxt', espNowOnline);
-        setLinkStatus('bleDot',    'bleTxt',    bleOnline);
-
-        document.getElementById('temp').textContent  = bleOnline ? (d.temperature.toFixed(1) + ' °C') : '--.- °C';
-        document.getElementById('hum').textContent   = bleOnline ? (d.humidity.toFixed(1) + ' %')     : '--.- %';
-        document.getElementById('light').textContent = espNowOnline ? (d.light_lux + ' / 1000')       : '-- / 1000';
-        document.getElementById('seq').textContent   = espNowOnline ? ('#' + d.last_rx_seq)           : 'Offline';
-
-        const btnToggle = document.getElementById('btnToggle');
-        const btnAway   = document.getElementById('btnAway');
-
-        if (!espNowOnline) {
-          document.getElementById('relayText').textContent = 'OFFLINE';
-          btnToggle.disabled = true;
-          btnAway.disabled   = true;
-        } else {
-          document.getElementById('relayText').textContent = d.relay_on ? 'ON' : 'OFF';
-          btnToggle.textContent = d.relay_on ? 'Turn Off Light' : 'Turn On Light';
-          btnToggle.className   = d.relay_on ? 'off' : 'on';
-          btnAway.textContent   = d.away_mode ? 'Disable Away Mode' : 'Enable Away Mode';
-          if (!isBusyAction) {
-            btnToggle.disabled = false;
-            btnAway.disabled   = false;
-          }
-        }
-
-        if (Array.isArray(d.hist_temp) && Array.isArray(d.hist_hum)) {
-          lastHistTemp = d.hist_temp;
-          lastHistHum  = d.hist_hum;
-          drawChart(lastHistTemp, lastHistHum);
-        }
-
-        document.getElementById('metaInfo').textContent = `FW: ${d.fw_version} | Wi-Fi Ch: ${d.channel} | MAC: ${d.mac}`;
+        if (res.ok) applyStatus(await res.json());
       } catch (e) {
         console.error(e);
       }
     }
 
-    async function sendAction(url) {
-      isBusyAction = true;
-      document.getElementById('btnToggle').disabled = true;
-      document.getElementById('btnAway').disabled   = true;
+    function connectWebSocket() {
+      const wsUrl = `ws://${window.location.hostname}:81/`;
       try {
-        await fetch(url, { method: 'POST', body: '', cache: 'no-store' });
-        await new Promise(r => setTimeout(r, 120));
-        await refreshStatus();
+        ws = new WebSocket(wsUrl);
       } catch (e) {
-        console.error(e);
-      } finally {
-        isBusyAction = false;
-        refreshStatus();
+        setTimeout(connectWebSocket, 2000);
+        return;
+      }
+
+      ws.onopen = () => {
+        wsConnected = true;
+        updateMetaFooter();
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          applyStatus(JSON.parse(evt.data));
+        } catch (e) {
+          console.error(e);
+        }
+      };
+
+      ws.onclose = () => {
+        wsConnected = false;
+        updateMetaFooter();
+        setTimeout(connectWebSocket, 2000);
+      };
+
+      ws.onerror = () => {
+        if (ws) ws.close();
+      };
+    }
+
+    async function sendCmd(action) {
+      if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ cmd: action }));
+      } else {
+        await fetch('/api/' + action, { method: 'POST', body: '', cache: 'no-store' });
+        await fetchFallbackStatus();
       }
     }
 
     setTheme(localStorage.getItem('hub_theme') || 'slate');
     window.addEventListener('resize', () => drawChart(lastHistTemp, lastHistHum));
 
-    refreshStatus();
-    setInterval(refreshStatus, 2000);
+    fetchFallbackStatus();
+    connectWebSocket();
+
+    // Chỉ dùng HTTP dự phòng khi WebSocket đang đứt
+    setInterval(() => {
+      if (!wsConnected) fetchFallbackStatus();
+    }, 3000);
   </script>
 </body>
 </html>

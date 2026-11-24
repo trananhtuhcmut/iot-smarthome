@@ -210,6 +210,43 @@
     .section-title svg { stroke: var(--accent); }
     .section-title.danger { color: var(--danger); }
     .section-title.danger svg { stroke: var(--danger); }
+      .sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.sec-head .section-title { margin-bottom: 0; }
+.btn-scan {
+  width: auto !important;
+  padding: 5px 11px !important;
+  font-size: 12px !important;
+  border-radius: 999px !important;
+  background: var(--btn-blue-bg);
+  color: var(--btn-blue-text);
+}
+.wifi-list {
+  display: none;
+  margin-top: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--tile);
+}
+.wifi-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 9px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.wifi-item:last-child { border-bottom: none; }
+.wifi-item:hover { filter: brightness(0.95); background: var(--card); }
+.wifi-meta { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
     label {
       display: block;
@@ -307,13 +344,17 @@
 
   <div class="card">
     <form method="POST" action="/save">
-      <b class="section-title">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
-        <span>1. Wi-Fi Router Network</span>
-      </b>
+      <div class="sec-head">
+        <b class="section-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+          <span>1. Wi-Fi Router Network</span>
+        </b>
+        <button type="button" id="btnScan" class="btn-scan" onclick="scanWifi()">Scan Wi-Fi</button>
+      </div>
 
       <label for="ssid">Wi-Fi Name (SSID)</label>
       <input id="ssid" name="ssid" maxlength="32" required placeholder="Enter 2.4GHz Wi-Fi name">
+      <div id="wifiList" class="wifi-list"></div>
 
       <label for="pass">Wi-Fi Password</label>
       <input id="pass" name="pass" type="password" maxlength="64" placeholder="Enter Wi-Fi password">
@@ -355,7 +396,7 @@
     </form>
   </div>
 
-  <small class="footer">Settings stored in NVS — interface loaded from LittleFS.</small>
+  <small class="footer">Settings stored in NVS - interface loaded from LittleFS.</small>
 
   <script>
     function setTheme(t) {
@@ -377,6 +418,52 @@
         }
       })
       .catch(console.error);
+
+      async function scanWifi() {
+      const btn = document.getElementById('btnScan');
+      const box = document.getElementById('wifiList');
+      btn.disabled = true;
+      btn.textContent = 'Scanning...';
+      box.style.display = 'block';
+      box.innerHTML = '<div class="wifi-item"><span class="wifi-meta">Scanning nearby 2.4GHz networks...</span></div>';
+
+      try {
+        const res = await fetch('/api/scan', { cache: 'no-store' });
+        const nets = await res.json();
+        box.innerHTML = '';
+
+        if (!Array.isArray(nets) || nets.length === 0) {
+          box.innerHTML = '<div class="wifi-item"><span class="wifi-meta">No 2.4GHz Wi-Fi found.</span></div>';
+          return;
+        }
+
+        nets.forEach(n => {
+          const item = document.createElement('div');
+          item.className = 'wifi-item';
+
+          const nameSpan = document.createElement('span');
+          nameSpan.textContent = (n.enc ? '🔒 ' : '🔓 ') + n.ssid;
+
+          const metaSpan = document.createElement('span');
+          metaSpan.className = 'wifi-meta';
+          metaSpan.textContent = `Ch ${n.ch} • ${n.rssi} dBm`;
+
+          item.appendChild(nameSpan);
+          item.appendChild(metaSpan);
+          item.onclick = () => {
+            document.getElementById('ssid').value = n.ssid;
+            box.style.display = 'none';
+            document.getElementById('pass').focus();
+          };
+          box.appendChild(item);
+        });
+      } catch (e) {
+        box.innerHTML = '<div class="wifi-item"><span class="wifi-meta">Scan failed. Try again.</span></div>';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Scan Wi-Fi';
+      }
+    }
   </script>
 </body>
 </html>

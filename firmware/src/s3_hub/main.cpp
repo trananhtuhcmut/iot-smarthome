@@ -2,8 +2,10 @@
 #include <math.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <WebSocketsServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <PubSubClient.h>
@@ -14,28 +16,27 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include "espnow_protocol.h"
-#include <LittleFS.h>
 
 // ==================== CẤU HÌNH PHẦN CỨNG ====================
-#define NEO_PIN          45    // Đèn RGB NeoPixel tích hợp trên mạch YoloUNO (ESP32-S3)
+#define NEO_PIN          45    // Đèn RGB NeoPixel tích hợp trên YoloUNO (ESP32-S3)
 #define LED_COUNT        1
 #define NEO_BRIGHTNESS   60    // Độ sáng 0-255
-#define PIN_BOOT_BTN     0     // Nút BOOT tích hợp trên YoloUNO (nhấn giữ 5s để reset NVS)
+#define PIN_BOOT_BTN     0     // Nút BOOT tích hợp (nhấn giữ 5s để reset NVS)
 
-// Chế độ AP cứu hộ / cấu hình ban đầu (phát khi chưa có Wi-Fi hoặc mất router)
+// Chế độ AP cứu hộ / cấu hình ban đầu
 #define FALLBACK_CHANNEL  1
 #define FALLBACK_AP_SSID  "YoloUNO_Offline"
 #define FALLBACK_AP_PASS  "12345678"
 #define DEFAULT_MQTT_PORT 1883
 
-// Giám sát mất kết nối WROOM & bộ đệm đồ thị
-#define ESPNOW_TIMEOUT_MS       10000 // Quá 10s không nhận gói từ WROOM -> Offline
-#define HISTORY_MAX_POINTS      30    // Lưu 30 mẫu gần nhất (~90 giây) cho đồ thị
-#define HISTORY_MIN_INTERVAL_MS 2000  // Chống ghi dồn mẫu khi bấm nút nhanh
+// Giám sát mất kết nối WROOM & lịch sử đồ thị
+#define ESPNOW_TIMEOUT_MS       10000 // Quá 10s không có gói từ WROOM -> Offline
+#define HISTORY_MAX_POINTS      30    // Lưu 30 mẫu gần nhất cho đồ thị offline
+#define HISTORY_MIN_INTERVAL_MS 2000
 
-#define FW_VERSION "1.2.0-chart"
+#define FW_VERSION "1.3.0-ws"
 
-// ==================== CÁC TOPIC LOCAL MQTT (HỢP ĐỒNG 2) ====================
+// ==================== CÁC TOPIC LOCAL MQTT (HỢP ĐỒNG 2 - 1 RELAY) ====================
 const char* TOPIC_TELEMETRY  = "smarthome/bedroom/telemetry";
 const char* TOPIC_HUB_STATUS = "smarthome/hub/status";
 const char* TOPIC_CMD_SWITCH = "smarthome/cmd/switch";
@@ -45,9 +46,9 @@ const char* TOPIC_AI_ALERT   = "smarthome/ai/alert";
 // ==================== FSM TRẠNG THÁI MẠNG (4 MÀU LED) ====================
 enum NetState : uint8_t {
   NET_INIT             = 0, // Đỏ: Đang khởi tạo
-  NET_ONLINE           = 1, // Xanh lá: Wi-Fi OK + MQTT OK (Web T07 trên LAN)
-  NET_MQTT_OFFLINE_LAN = 2, // Tím: Wi-Fi OK, MQTT lỗi (Web T07 vẫn chạy trên LAN)
-  NET_WIFI_OFFLINE_AP  = 3  // Xanh dương: Mất Wi-Fi / Chưa cấu hình -> Phát AP riêng kênh 1
+  NET_ONLINE           = 1, // Xanh lá: Wi-Fi OK + MQTT OK
+  NET_MQTT_OFFLINE_LAN = 2, // Tím: Wi-Fi LAN OK, MQTT chưa bật/lỗi
+  NET_WIFI_OFFLINE_AP  = 3  // Xanh dương: Mất Wi-Fi / Chưa cấu hình -> Phát AP kênh 1
 };
 
 volatile NetState currentNetState = NET_INIT;
@@ -59,15 +60,6 @@ const char* netStateToStr(NetState st) {
     case NET_MQTT_OFFLINE_LAN: return "LAN ONLY: MQTT Offline (PURPLE)";
     case NET_WIFI_OFFLINE_AP:  return "OFFLINE AP MODE (BLUE)";
     default:                   return "UNKNOWN";
-  }
-}
-
-void setNetState(NetState nextState) {
-  if (currentNetState != nextState) {
-    Serial.printf("[FSM] %s  --->  %s\n",
-                  netStateToStr(currentNetState),
-                  netStateToStr(nextState));
-    currentNetState = nextState;
   }
 }
 
@@ -99,8 +91,25 @@ enum EspNowTxAction : uint8_t {
 SemaphoreHandle_t xStateMutex          = nullptr;
 SemaphoreHandle_t xConfigMutex         = nullptr;
 SemaphoreHandle_t xMqttPubTelemetrySem = nullptr;
+SemaphoreHandle_t xWsBroadcastSem      = nullptr; // Đánh thức TaskWebServer bắn WebSocket ngay
 QueueHandle_t     xEspNowRxQueue       = nullptr;
 QueueHandle_t     xEspNowTxQueue       = nullptr;
+
+void notifyWebClients() {
+  if (xWsBroadcastSem != nullptr) {
+    xSemaphoreGive(xWsBroadcastSem);
+  }
+}
+
+void setNetState(NetState nextState) {
+  if (currentNetState != nextState) {
+    Serial.printf("[FSM] %s  --->  %s\n",
+                  netStateToStr(currentNetState),
+                  netStateToStr(nextState));
+    currentNetState = nextState;
+    notifyWebClients();
+  }
+}
 
 // ==================== TRẠNG THÁI DÙNG CHUNG & LỊCH SỬ ĐỒ THỊ ====================
 struct SystemState {
@@ -109,8 +118,8 @@ struct SystemState {
   uint16_t light_lux     = 0;
   uint8_t  switch_mask   = 0;
   bool     away_mode     = false;
-  bool     espnow_online = false; // Trạng thái kết nối tới WROOM
-  bool     ble_online    = false; // Trạng thái kết nối BLE từ C3 qua WROOM
+  bool     espnow_online = false;
+  bool     ble_online    = false;
   uint8_t  alert_code    = ALERT_NONE;
   char     alert_msg[32] = "OK";
   uint16_t last_rx_seq   = 0;
@@ -143,12 +152,17 @@ void pushEnvHistoryLocked(float temp, float hum) {
 }
 
 // ==================== BIẾN NỘI BỘ TỪNG TASK ====================
+// TaskEspNow (độc quyền truy cập)
 uint8_t wroomMac[6] = {0};
 bool hasWroomMac    = false;
 uint8_t lvglMac[6]  = {0};
 bool hasLvglMac     = false;
 uint16_t hubSeq     = 0;
 
+volatile bool s3SendDone = false;
+volatile bool s3SendOk   = false;
+
+// TaskNetworkMqtt (độc quyền truy cập)
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 char     activeMqttHost[65] = "";
@@ -162,17 +176,21 @@ uint32_t pendingRebootAtMs    = 0;
 
 bool isRetryingWifi         = false;
 bool forceMqttRetryNow      = false;
+uint8_t mqttFailStreak      = 0;
 uint32_t lastWifiRetryMs    = 0;
 uint32_t wifiRetryStartMs   = 0;
 uint32_t lastMqttRetryMs    = 0;
 uint32_t lastStatusPubMs    = 0;
 
-const uint32_t WIFI_RETRY_INTERVAL_MS = 30000;
-const uint32_t WIFI_RETRY_TIMEOUT_MS  = 5000;
-const uint32_t MQTT_RETRY_INTERVAL_MS = 5000;
-const uint32_t STATUS_PUB_INTERVAL_MS = 10000;
+const uint32_t WIFI_RETRY_INTERVAL_MS      = 30000;
+const uint32_t WIFI_RETRY_TIMEOUT_MS       = 5000;
+const uint32_t MQTT_RETRY_FAST_MS          = 5000;  // 3 lần đầu thử mỗi 5s
+const uint32_t MQTT_RETRY_SLOW_MS          = 15000; // Khi Broker chưa bật -> giãn 15s tránh nghẽn mạng
+const uint32_t STATUS_PUB_INTERVAL_MS      = 10000;
 
+// TaskWebServer (độc quyền HTTP + WebSocket + DNS)
 WebServer webServer(80);
+WebSocketsServer webSocket(81);
 DNSServer dnsServer;
 bool dnsRunning = false;
 
@@ -265,6 +283,53 @@ void printMac(const uint8_t* mac) {
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
+bool applyToggleFromUi() {
+  bool canControl = false;
+  if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (sysState.espnow_online) {
+      canControl = true;
+      bool relayOn = (sysState.switch_mask & SW_BED_LIGHT_BIT) != 0;
+      if (relayOn) {
+        sysState.switch_mask &= ~SW_BED_LIGHT_BIT;
+      } else {
+        sysState.switch_mask |= SW_BED_LIGHT_BIT;
+        sysState.away_mode = false;
+      }
+    }
+    xSemaphoreGive(xStateMutex);
+  }
+
+  if (canControl) {
+    queueEspNowAction(TX_CMD_WROOM);
+    queueEspNowAction(TX_SYNC_LVGL);
+    xSemaphoreGive(xMqttPubTelemetrySem);
+    notifyWebClients();
+  }
+  return canControl;
+}
+
+bool applyAwayFromUi() {
+  bool canControl = false;
+  if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (sysState.espnow_online) {
+      canControl = true;
+      sysState.away_mode = !sysState.away_mode;
+      if (sysState.away_mode) {
+        sysState.switch_mask &= ~SW_BED_LIGHT_BIT;
+      }
+    }
+    xSemaphoreGive(xStateMutex);
+  }
+
+  if (canControl) {
+    queueEspNowAction(TX_CMD_WROOM);
+    queueEspNowAction(TX_SYNC_LVGL);
+    xSemaphoreGive(xMqttPubTelemetrySem);
+    notifyWebClients();
+  }
+  return canControl;
+}
+
 // ==================== TASK 4: NEOPIXEL + NÚT BOOT RESET 5S (CORE 1 - ƯU TIÊN 1) ====================
 void TaskNeoPixelAndBootBtn(void* pvParameters) {
   Adafruit_NeoPixel strip(LED_COUNT, NEO_PIN, NEO_GRB + NEO_KHZ800);
@@ -336,7 +401,7 @@ void TaskNeoPixelAndBootBtn(void* pvParameters) {
   }
 }
 
-// ==================== LOGIC ESP-NOW ====================
+// ==================== LOGIC ESP-NOW (CÓ RETRY THEO ACK PHẦN CỨNG) ====================
 bool ensureEspNowPeer(const uint8_t* mac) {
   if (esp_now_is_peer_exist(mac)) return true;
 
@@ -356,55 +421,13 @@ bool ensureEspNowPeer(const uint8_t* mac) {
   return false;
 }
 
-void sendEspNowToPeer(const uint8_t* mac, bool hasPeer, const EspNowPacket& pkt, const char* peerName) {
-  if (!hasPeer) {
-    Serial.printf("[ESP-NOW] Chua biet MAC cua %s -> Bo qua gui.\n", peerName);
-    return;
-  }
-  if (!ensureEspNowPeer(mac)) return;
-
-  esp_err_t res = esp_now_send(mac, (const uint8_t*)&pkt, sizeof(pkt));
-  Serial.printf("[ESP-NOW -> %s] type=%u | sw=0x%02X | away=%u | alert=%u | Send=%s\n",
-                peerName, pkt.msg_type, pkt.switch_mask, pkt.away_mode, pkt.alert_code,
-                (res == ESP_OK) ? "OK" : "ERR");
-}
-
-void executeEspNowTx(EspNowTxAction action) {
-  SystemState snap = getStateSnapshot();
-  EspNowPacket pkt = {};
-  pkt.node_id     = NODE_S3_HUB;
-  pkt.seq         = ++hubSeq;
-  pkt.temperature = snap.temperature;
-  pkt.humidity    = snap.humidity;
-  pkt.light_lux   = snap.light_lux;
-  pkt.switch_mask = snap.switch_mask;
-  pkt.away_mode   = snap.away_mode ? 1 : 0;
-  pkt.alert_code  = snap.alert_code;
-  pkt.espnow_online = snap.espnow_online ? 1 : 0;
-  pkt.ble_online  = (snap.espnow_online && snap.ble_online) ? 1 : 0;
-  strncpy(pkt.alert_msg, snap.alert_msg, sizeof(pkt.alert_msg) - 1);
-  pkt.alert_msg[sizeof(pkt.alert_msg) - 1] = '\0';
-
-  if (action == TX_CMD_WROOM) {
-    pkt.msg_type = MSG_COMMAND;
-    sendEspNowToPeer(wroomMac, hasWroomMac, pkt, "WROOM");
-  } else if (action == TX_SYNC_LVGL) {
-    pkt.msg_type = MSG_STATE_SYNC;
-    sendEspNowToPeer(lvglMac, hasLvglMac, pkt, "LVGL");
-  } else if (action == TX_ALERT_LVGL) {
-    pkt.msg_type = MSG_ALERT;
-    sendEspNowToPeer(lvglMac, hasLvglMac, pkt, "LVGL");
-  }
-}
-
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
 void onDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t status) {
 #else
 void onDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
 #endif
-  if (status != ESP_NOW_SEND_SUCCESS) {
-    Serial.println("[ESP-NOW] Gui xuong node khong nhan duoc ACK!");
-  }
+  s3SendOk   = (status == ESP_NOW_SEND_SUCCESS);
+  s3SendDone = true;
 }
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
@@ -421,13 +444,71 @@ void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
   xQueueSend(xEspNowRxQueue, &item, 0);
 }
 
-// ==================== TASK 1: ĐIỀU PHỐI ESP-NOW + GIÁM SÁT TIMEOUT (CORE 1 - ƯU TIÊN 3) ====================
+bool sendEspNowToPeer(const uint8_t* mac, bool hasPeer, const EspNowPacket& pkt,
+                      const char* peerName, uint8_t maxRetries = 5) {
+  if (!hasPeer) {
+    return false;
+  }
+  if (!ensureEspNowPeer(mac)) return false;
+
+  for (uint8_t attempt = 1; attempt <= maxRetries; attempt++) {
+    s3SendDone = false;
+    s3SendOk   = false;
+    esp_err_t res = esp_now_send(mac, (const uint8_t*)&pkt, sizeof(pkt));
+
+    if (res == ESP_OK) {
+      uint32_t t0 = millis();
+      while (!s3SendDone && (millis() - t0 < 50)) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+      }
+      if (s3SendDone && s3SendOk) {
+        Serial.printf("[ESP-NOW -> %s] OK (lan %u/%u) | type=%u | sw=0x%02X | away=%u\n",
+                      peerName, attempt, maxRetries, pkt.msg_type, pkt.switch_mask, pkt.away_mode);
+        return true;
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(45)); // Né cửa sổ radio BLE của WROOM rồi thử lại
+  }
+
+  Serial.printf("[ESP-NOW -> %s] THAT BAI sau %u lan thu!\n", peerName, maxRetries);
+  return false;
+}
+
+void executeEspNowTx(EspNowTxAction action) {
+  SystemState snap = getStateSnapshot();
+  EspNowPacket pkt = {};
+  pkt.node_id       = NODE_S3_HUB;
+  pkt.seq           = ++hubSeq;
+  pkt.temperature   = snap.temperature;
+  pkt.humidity      = snap.humidity;
+  pkt.light_lux     = snap.light_lux;
+  pkt.switch_mask   = snap.switch_mask;
+  pkt.away_mode     = snap.away_mode ? 1 : 0;
+  pkt.alert_code    = snap.alert_code;
+  pkt.espnow_online = snap.espnow_online ? 1 : 0;
+  pkt.ble_online    = (snap.espnow_online && snap.ble_online) ? 1 : 0;
+  strncpy(pkt.alert_msg, snap.alert_msg, sizeof(pkt.alert_msg) - 1);
+  pkt.alert_msg[sizeof(pkt.alert_msg) - 1] = '\0';
+
+  if (action == TX_CMD_WROOM) {
+    pkt.msg_type = MSG_COMMAND;
+    sendEspNowToPeer(wroomMac, hasWroomMac, pkt, "WROOM", 5);
+  } else if (action == TX_SYNC_LVGL) {
+    pkt.msg_type = MSG_STATE_SYNC;
+    sendEspNowToPeer(lvglMac, hasLvglMac, pkt, "LVGL", 2);
+  } else if (action == TX_ALERT_LVGL) {
+    pkt.msg_type = MSG_ALERT;
+    sendEspNowToPeer(lvglMac, hasLvglMac, pkt, "LVGL", 3);
+  }
+}
+
+// ==================== TASK 1: ĐIỀU PHỐI ESP-NOW (CORE 1 - ƯU TIÊN 3) ====================
 void TaskEspNow(void* pvParameters) {
   EspNowRxItem rxItem;
   EspNowTxAction txAction;
 
   for (;;) {
-    // 1. Nhận gói tin ESP-NOW từ WROOM / LVGL
+    // 1. Nhận gói tin từ WROOM / LVGL
     while (xQueueReceive(xEspNowRxQueue, &rxItem, 0) == pdTRUE) {
       const EspNowPacket& p = rxItem.pkt;
 
@@ -453,7 +534,6 @@ void TaskEspNow(void* pvParameters) {
             sysState.last_rx_seq   = p.seq;
             sysState.last_rx_ms    = millis();
 
-            // Chỉ lưu vào đồ thị khi cảm biến BLE đang có số liệu hợp lệ
             if (sysState.ble_online) {
               pushEnvHistoryLocked(p.temperature, p.humidity);
             }
@@ -468,6 +548,7 @@ void TaskEspNow(void* pvParameters) {
                         p.light_lux,
                         (p.switch_mask & SW_BED_LIGHT_BIT) ? "ON" : "OFF");
 
+          notifyWebClients(); // Bắn WebSocket xuống trình duyệt NGAY LẬP TỨC
           xSemaphoreGive(xMqttPubTelemetrySem);
           executeEspNowTx(TX_SYNC_LVGL);
         }
@@ -491,15 +572,16 @@ void TaskEspNow(void* pvParameters) {
             xSemaphoreGive(xStateMutex);
           }
 
-          Serial.printf("[ESP-NOW <- LVGL] Lenh sw=0x%02X | away=%d -> Chuyen tiep xuong WROOM\n",
+          Serial.printf("[ESP-NOW <- LVGL] sw=0x%02X | away=%d -> Gui xuong WROOM\n",
                         newMask, newAway);
+          notifyWebClients();
           executeEspNowTx(TX_CMD_WROOM);
           xSemaphoreGive(xMqttPubTelemetrySem);
         }
       }
     }
 
-    // 2. Kiểm tra mất kết nối WROOM (quá 10 giây không nhận gói ESP-NOW)
+    // 2. Giám sát mất kết nối WROOM (quá 10 giây)
     bool wroomTimedOut = false;
     if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
       if (sysState.espnow_online && (millis() - sysState.last_rx_ms > ESPNOW_TIMEOUT_MS)) {
@@ -511,12 +593,13 @@ void TaskEspNow(void* pvParameters) {
     }
 
     if (wroomTimedOut) {
-      Serial.println("[ESP-NOW] Mat ket noi WROOM (>10s khong co goi tin) -> espnow_online=0, ble_online=0");
+      Serial.println("[ESP-NOW] Mat ket noi WROOM (>10s) -> espnow_online=0, ble_online=0");
+      notifyWebClients();
       xSemaphoreGive(xMqttPubTelemetrySem);
       executeEspNowTx(TX_SYNC_LVGL);
     }
 
-    // 3. Gửi các lệnh ESP-NOW đang chờ
+    // 3. Gửi lệnh ESP-NOW từ WebSocket / HTTP / MQTT
     while (xQueueReceive(xEspNowTxQueue, &txAction, 0) == pdTRUE) {
       executeEspNowTx(txAction);
     }
@@ -611,6 +694,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
       }
       queueEspNowAction(TX_CMD_WROOM);
       queueEspNowAction(TX_SYNC_LVGL);
+      notifyWebClients();
     }
   } else if (strcmp(topic, TOPIC_CMD_MODE) == 0) {
     bool away     = doc["away_mode"]      | false;
@@ -625,6 +709,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     }
     queueEspNowAction(TX_CMD_WROOM);
     queueEspNowAction(TX_SYNC_LVGL);
+    notifyWebClients();
     publishHubStatus();
   } else if (strcmp(topic, TOPIC_AI_ALERT) == 0) {
     uint8_t code    = doc["alert_code"] | ALERT_NONE;
@@ -637,25 +722,25 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
       xSemaphoreGive(xStateMutex);
     }
     queueEspNowAction(TX_ALERT_LVGL);
+    notifyWebClients();
   }
 }
 
 bool connectMqttOnce() {
   if (strlen(activeMqttHost) == 0) {
-    Serial.printf("[MQTT] Chua cai dat IP Broker -> Mo http://%s/config de nhap.\n",
-                  WiFi.localIP().toString().c_str());
-    return false;
+    return false; // Chưa nhập IP Broker -> giữ chế độ LAN (Tím) hoàn toàn yên tĩnh
   }
 
   String clientId = "YoloUNO_Hub_" + String((uint32_t)ESP.getEfuseMac(), HEX);
   const char* lwtPayload = "{\"device\":\"YoloUNO_Hub\",\"online\":false}";
 
-  Serial.printf("[MQTT] Dang ket noi Broker %s:%u ...\n", activeMqttHost, activeMqttPort);
+  Serial.printf("[MQTT] Thu ket noi Broker %s:%u ...\n", activeMqttHost, activeMqttPort);
   bool ok = (strlen(activeMqttUser) > 0)
     ? mqttClient.connect(clientId.c_str(), activeMqttUser, activeMqttPass, TOPIC_HUB_STATUS, 1, true, lwtPayload)
     : mqttClient.connect(clientId.c_str(), TOPIC_HUB_STATUS, 1, true, lwtPayload);
 
   if (ok) {
+    mqttFailStreak = 0;
     Serial.println("[MQTT] >>> KET NOI LOCAL BROKER THANH CONG!");
     mqttClient.subscribe(TOPIC_CMD_SWITCH, 1);
     mqttClient.subscribe(TOPIC_CMD_MODE, 1);
@@ -665,8 +750,10 @@ bool connectMqttOnce() {
     return true;
   }
 
-  Serial.printf("[MQTT] Ket noi that bai (rc=%d) -> Giu Web T07 tren mang LAN (http://%s/), thu lai sau 5s.\n",
-                mqttClient.state(), WiFi.localIP().toString().c_str());
+  if (mqttFailStreak < 10) mqttFailStreak++;
+  uint32_t nextWaitSec = (mqttFailStreak >= 3) ? (MQTT_RETRY_SLOW_MS / 1000) : (MQTT_RETRY_FAST_MS / 1000);
+  Serial.printf("[MQTT] Broker chua phan hoi (rc=%d) -> Giu Web LAN + WS, thu lai sau %lus.\n",
+                mqttClient.state(), (unsigned long)nextWaitSec);
   return false;
 }
 
@@ -682,13 +769,16 @@ void enterWifiOfflineAp() {
   lastWifiRetryMs = millis();
   isRetryingWifi  = false;
 
-  Serial.printf("[WIFI] Phat AP '%s' (Pass: %s | Kenh %d | Cau hinh: http://%s/config)\n",
+  Serial.printf("[WIFI] Phat AP '%s' (Pass: %s | Kenh %d | Web: http://%s/)\n",
                 FALLBACK_AP_SSID, FALLBACK_AP_PASS, FALLBACK_CHANNEL,
                 WiFi.softAPIP().toString().c_str());
 }
 
 // ==================== TASK 2: FSM MẠNG & MQTT (CORE 0 - ƯU TIÊN 1) ====================
 void TaskNetworkMqtt(void* pvParameters) {
+  // Hạ timeout TCP xuống 2 giây để tránh treo lwIP khi Mosquitto chưa chạy
+  wifiClient.setTimeout(2);
+  mqttClient.setSocketTimeout(2);
   mqttClient.setBufferSize(512);
   mqttClient.setCallback(onMqttMessage);
   syncActiveMqttConfig();
@@ -696,6 +786,7 @@ void TaskNetworkMqtt(void* pvParameters) {
   for (;;) {
     if (mqttConfigDirty) {
       mqttConfigDirty = false;
+      mqttFailStreak  = 0;
       if (mqttClient.connected()) {
         mqttClient.disconnect();
       }
@@ -730,6 +821,7 @@ void TaskNetworkMqtt(void* pvParameters) {
         if (!mqttClient.connected()) {
           Serial.println("[MQTT] Mat ket noi Broker -> Chuyen sang che do LAN (Tim)!");
           lastMqttRetryMs = millis();
+          mqttFailStreak  = 0;
           setNetState(NET_MQTT_OFFLINE_LAN);
           break;
         }
@@ -752,7 +844,12 @@ void TaskNetworkMqtt(void* pvParameters) {
           break;
         }
 
-        if (forceMqttRetryNow || (millis() - lastMqttRetryMs >= MQTT_RETRY_INTERVAL_MS)) {
+        if (strlen(activeMqttHost) == 0) {
+          break; // Chưa điền IP MQTT -> không gọi connect vô ích
+        }
+
+        uint32_t retryGap = (mqttFailStreak >= 3) ? MQTT_RETRY_SLOW_MS : MQTT_RETRY_FAST_MS;
+        if (forceMqttRetryNow || (millis() - lastMqttRetryMs >= retryGap)) {
           forceMqttRetryNow = false;
           lastMqttRetryMs   = millis();
           if (connectMqttOnce()) {
@@ -767,6 +864,7 @@ void TaskNetworkMqtt(void* pvParameters) {
           WiFi.softAPdisconnect(true);
           isRetryingWifi    = false;
           forceMqttRetryNow = true;
+          mqttFailStreak    = 0;
           Serial.printf("[WIFI] >>> Router da song lai! Kenh %ld | Web LAN: http://%s/\n",
                         (long)WiFi.channel(), WiFi.localIP().toString().c_str());
           setNetState(NET_MQTT_OFFLINE_LAN);
@@ -797,22 +895,8 @@ void TaskNetworkMqtt(void* pvParameters) {
   }
 }
 
-// ==================== LOCAL WEB SERVER (T07 - LITTLEFS + JSON API) ====================
-void serveHtmlFile(const char* path) {
-  if (!LittleFS.exists(path)) {
-    webServer.send(404, "text/plain",
-                   "Chua nap file HTML! Hay chay 'Upload Filesystem Image' trong PlatformIO.");
-    return;
-  }
-  File file = LittleFS.open(path, "r");
-  webServer.streamFile(file, "text/html");
-  file.close();
-}
-
-void handleWebRoot()   { serveHtmlFile("/index.html");  }
-void handleWebConfig() { serveHtmlFile("/config.html"); }
-
-void handleApiStatus() {
+// ==================== LOCAL WEB SERVER (T07 - LITTLEFS + WEBSOCKET PORT 81) ====================
+String buildStatusJson() {
   SystemState snap;
   float histTempCopy[HISTORY_MAX_POINTS];
   float histHumCopy[HISTORY_MAX_POINTS];
@@ -875,13 +959,68 @@ void handleApiStatus() {
 
   String out;
   serializeJson(doc, out);
+  return out;
+}
+
+void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED: {
+      IPAddress ip = webSocket.remoteIP(num);
+      Serial.printf("[WS #%u] Client ket noi tu %s\n", num, ip.toString().c_str());
+      String initJson = buildStatusJson();
+      webSocket.sendTXT(num, initJson);
+      break;
+    }
+
+    case WStype_DISCONNECTED:
+      Serial.printf("[WS #%u] Client ngat ket noi\n", num);
+      break;
+
+    case WStype_TEXT: {
+      JsonDocument doc;
+      if (deserializeJson(doc, payload, length)) return;
+
+      const char* cmd = doc["cmd"] | "";
+      if (strcmp(cmd, "toggle") == 0) {
+        Serial.printf("[WS #%u] Lenh toggle relay\n", num);
+        applyToggleFromUi();
+      } else if (strcmp(cmd, "away") == 0) {
+        Serial.printf("[WS #%u] Lenh away mode\n", num);
+        applyAwayFromUi();
+      } else if (strcmp(cmd, "sync") == 0) {
+        String snapJson = buildStatusJson();
+        webSocket.sendTXT(num, snapJson);
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+}
+
+void serveHtmlFile(const char* path) {
+  if (!LittleFS.exists(path)) {
+    webServer.send(404, "text/plain",
+                   "Chua nap file HTML! Hay chay 'Upload Filesystem Image' trong PlatformIO.");
+    return;
+  }
+  File file = LittleFS.open(path, "r");
+  webServer.streamFile(file, "text/html");
+  file.close();
+}
+
+void handleWebRoot()   { serveHtmlFile("/index.html");  }
+void handleWebConfig() { serveHtmlFile("/config.html"); }
+
+void handleApiStatus() {
+  String out = buildStatusJson();
   webServer.sendHeader("Cache-Control", "no-store");
   webServer.send(200, "application/json", out);
 }
 
 void handleApiConfig() {
   AppConfig cfg = getConfigSnapshot();
-
   JsonDocument doc;
   doc["ssid"]      = cfg.wifi_ssid;
   doc["has_pass"]  = (strlen(cfg.wifi_pass) > 0);
@@ -895,61 +1034,89 @@ void handleApiConfig() {
   webServer.send(200, "application/json", out);
 }
 
-void handleApiToggle() {
-  bool canControl = false;
-  if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    if (sysState.espnow_online) {
-      canControl = true;
-      bool relayOn = (sysState.switch_mask & SW_BED_LIGHT_BIT) != 0;
-      if (relayOn) {
-        sysState.switch_mask &= ~SW_BED_LIGHT_BIT;
-      } else {
-        sysState.switch_mask |= SW_BED_LIGHT_BIT;
-        sysState.away_mode = false;
+void handleApiScan() {
+  Serial.println("[WEB] Dang quet cac mang Wi-Fi 2.4GHz xung quanh...");
+  int n = WiFi.scanNetworks(false, false);
+
+  struct WifiItem {
+    String  ssid;
+    int32_t rssi;
+    int32_t ch;
+    bool    enc;
+  };
+
+  WifiItem list[15];
+  int count = 0;
+
+  for (int i = 0; i < n; i++) {
+    String s = WiFi.SSID(i);
+    if (s.length() == 0) continue;
+
+    int32_t rssi = WiFi.RSSI(i);
+    int32_t ch   = WiFi.channel(i);
+    bool    enc  = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+
+    int existIdx = -1;
+    for (int j = 0; j < count; j++) {
+      if (list[j].ssid == s) {
+        existIdx = j;
+        break;
       }
     }
-    xSemaphoreGive(xStateMutex);
+
+    if (existIdx >= 0) {
+      if (rssi > list[existIdx].rssi) {
+        list[existIdx].rssi = rssi;
+        list[existIdx].ch   = ch;
+        list[existIdx].enc  = enc;
+      }
+    } else if (count < 15) {
+      list[count++] = {s, rssi, ch, enc};
+    }
   }
 
-  Serial.printf("[WEB] /api/toggle | espnow_online=%d\n", canControl ? 1 : 0);
+  WiFi.scanDelete();
 
-  if (canControl) {
-    queueEspNowAction(TX_CMD_WROOM);
-    queueEspNowAction(TX_SYNC_LVGL);
-    xSemaphoreGive(xMqttPubTelemetrySem);
-    webServer.sendHeader("Cache-Control", "no-store");
-    webServer.send(200, "application/json", "{\"ok\":true}");
-  } else {
-    webServer.sendHeader("Cache-Control", "no-store");
-    webServer.send(200, "application/json", "{\"ok\":false,\"error\":\"wroom_offline\"}");
+  if (currentNetState == NET_WIFI_OFFLINE_AP) {
+    esp_wifi_set_channel(FALLBACK_CHANNEL, WIFI_SECOND_CHAN_NONE);
   }
+
+  for (int i = 0; i < count - 1; i++) {
+    for (int j = i + 1; j < count; j++) {
+      if (list[j].rssi > list[i].rssi) {
+        WifiItem tmp = list[i];
+        list[i] = list[j];
+        list[j] = tmp;
+      }
+    }
+  }
+
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (int i = 0; i < count; i++) {
+    JsonObject obj = arr.add<JsonObject>();
+    obj["ssid"] = list[i].ssid;
+    obj["rssi"] = list[i].rssi;
+    obj["ch"]   = list[i].ch;
+    obj["enc"]  = list[i].enc;
+  }
+
+  String out;
+  serializeJson(doc, out);
+  webServer.sendHeader("Cache-Control", "no-store");
+  webServer.send(200, "application/json", out);
+}
+
+void handleApiToggle() {
+  bool ok = applyToggleFromUi();
+  webServer.sendHeader("Cache-Control", "no-store");
+  webServer.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"wroom_offline\"}");
 }
 
 void handleApiAway() {
-  bool canControl = false;
-  if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    if (sysState.espnow_online) {
-      canControl = true;
-      sysState.away_mode = !sysState.away_mode;
-      if (sysState.away_mode) {
-        sysState.switch_mask &= ~SW_BED_LIGHT_BIT;
-      }
-    }
-    xSemaphoreGive(xStateMutex);
-  }
-
-  Serial.printf("[WEB] /api/away | espnow_online=%d\n", canControl ? 1 : 0);
-
-  if (canControl) {
-    queueEspNowAction(TX_CMD_WROOM);
-    queueEspNowAction(TX_SYNC_LVGL);
-    xSemaphoreGive(xMqttPubTelemetrySem);
-    webServer.sendHeader("Cache-Control", "no-store");
-    webServer.send(200, "application/json", "{\"ok\":true}");
-  } else {
-    webServer.sendHeader("Cache-Control", "no-store");
-    webServer.send(200, "application/json", "{\"ok\":false,\"error\":\"wroom_offline\"}");
-  }
+  bool ok = applyAwayFromUi();
+  webServer.sendHeader("Cache-Control", "no-store");
+  webServer.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"wroom_offline\"}");
 }
 
 void handleWebSave() {
@@ -1026,18 +1193,23 @@ void handleWebNotFound() {
   webServer.send(404, "text/plain", "404 Not Found");
 }
 
+// ==================== TASK 3: HTTP + WEBSOCKET + DNS (CORE 1 - ƯU TIÊN 2) ====================
 void TaskWebServer(void* pvParameters) {
   webServer.on("/",           HTTP_GET,  handleWebRoot);
   webServer.on("/config",     HTTP_GET,  handleWebConfig);
   webServer.on("/api/status", HTTP_GET,  handleApiStatus);
   webServer.on("/api/config", HTTP_GET,  handleApiConfig);
+  webServer.on("/api/scan",   HTTP_GET,  handleApiScan);
   webServer.on("/api/toggle", HTTP_ANY,  handleApiToggle);
   webServer.on("/api/away",   HTTP_ANY,  handleApiAway);
   webServer.on("/save",       HTTP_POST, handleWebSave);
   webServer.on("/reset",      HTTP_POST, handleWebReset);
   webServer.onNotFound(handleWebNotFound);
   webServer.begin();
-  Serial.println("[WEB T07] Local Web Server (LittleFS) dang chay tren cong 80!");
+
+  webSocket.begin();
+  webSocket.onEvent(onWebSocketEvent);
+  Serial.println("[WEB T07] HTTP (port 80) + WebSocket (port 81) san sang!");
 
   for (;;) {
     if (currentNetState == NET_WIFI_OFFLINE_AP && !dnsRunning) {
@@ -1053,18 +1225,28 @@ void TaskWebServer(void* pvParameters) {
     }
 
     webServer.handleClient();
+    webSocket.loop();
+
+    // Chỉ đẩy WebSocket từ duy nhất TaskWebServer để an toàn tuyệt đối cho lwIP
+    if (xSemaphoreTake(xWsBroadcastSem, 0) == pdTRUE) {
+      if (webSocket.connectedClients() > 0) {
+        String out = buildStatusJson();
+        webSocket.broadcastTXT(out);
+      }
+    }
 
     if (pendingReboot && (int32_t)(millis() - pendingRebootAtMs) >= 0) {
       ESP.restart();
     }
 
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
 
 // ==================== KHỞI TẠO WI-FI (TỪ NVS) & ESP-NOW ====================
 void initWiFiAndEspNow() {
   WiFi.mode(WIFI_AP_STA);
+  WiFi.setSleep(false); // Tắt Modem Sleep giúp WebSocket & ESP-NOW phản hồi tức thì
   WiFi.setAutoReconnect(false);
 
   AppConfig cfg = getConfigSnapshot();
@@ -1113,6 +1295,7 @@ void setup() {
   xStateMutex          = xSemaphoreCreateMutex();
   xConfigMutex         = xSemaphoreCreateMutex();
   xMqttPubTelemetrySem = xSemaphoreCreateBinary();
+  xWsBroadcastSem      = xSemaphoreCreateBinary();
   xEspNowRxQueue       = xQueueCreate(8, sizeof(EspNowRxItem));
   xEspNowTxQueue       = xQueueCreate(8, sizeof(EspNowTxAction));
 
@@ -1133,7 +1316,7 @@ void setup() {
   xTaskCreatePinnedToCore(TaskWebServer,   "WebServer", 8192, nullptr, 2, nullptr, 1);
   xTaskCreatePinnedToCore(TaskNetworkMqtt, "NetMqtt",   6144, nullptr, 1, nullptr, 0);
 
-  Serial.println("[SYSTEM] YoloUNO S3 Hub (FreeRTOS + FSM + NVS + Chart) san sang!");
+  Serial.println("[SYSTEM] YoloUNO S3 Hub (FreeRTOS + WebSocket + Retry) san sang!");
 }
 
 void loop() {
