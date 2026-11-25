@@ -15,8 +15,8 @@
 
 #define PIN_DHT          4      // Chân DATA của DHT11 nối vào GPIO 4
 #define DHT_TYPE         DHT11
-#define PIN_RGB_LED      48     // LED RGB tích hợp trên ESP32-S3 N16R8 (nếu không sáng đổi thành 38)
-#define PIN_OUT_LOW      5      // Chân xuất mức LOW (chuyển từ GPIO 3 sang GPIO 5)
+#define PIN_STATUS_LED   2      // LED xanh đơn tích hợp sẵn trên ESP32 DevKit V1
+#define PIN_OUT_LOW      18     // Đổi từ GPIO 5 sang GPIO 18 để tránh chân strapping
 
 const uint32_t UPDATE_INTERVAL_MS = 3000;
 
@@ -40,7 +40,7 @@ float simTemp = 28.5f;
 float simHum  = 65.0f;
 
 void setStatusLed(uint8_t r, uint8_t g, uint8_t b) {
-  neopixelWrite(PIN_RGB_LED, r, g, b);
+  digitalWrite(PIN_STATUS_LED, (r > 0 || g > 0 || b > 0) ? HIGH : LOW);
 }
 
 // ==================== CALLBACK KẾT NỐI BLE (NimBLE 2.x) ====================
@@ -177,7 +177,7 @@ void setup() {
   delay(1500);
 
   randomSeed(esp_random());
-
+  pinMode(PIN_STATUS_LED, OUTPUT);
   setStatusLed(0, 0, 0);
 
   pinMode(PIN_OUT_LOW, OUTPUT);
