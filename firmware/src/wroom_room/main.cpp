@@ -3,6 +3,10 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <NimBLEDevice.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include "espnow_protocol.h"
 #include "ble_protocol.h"
 
@@ -11,64 +15,129 @@
 #define PIN_BUTTON        27
 #define PIN_LIGHT_AO      34  // ADC1 - cắm chân AO của MH-Sensor khi có hàng
 
-// Relay kích mức LOW (tải đấu vào COM + NO; nếu đấu COM + NC thì đảo ngược 2 dòng này)
-#define RELAY_ON          LOW
-#define RELAY_OFF         HIGH
+// Relay kích mức LOW (tải đấu COM + NO; nếu đấu COM + NC thì đảo ngược 2 dòng này)
+#define RELAY_OFF          LOW
+#define RELAY_ON           HIGH
 
 // 1 = Giả lập cảm biến ánh sáng, 0 = Đọc thật từ GPIO 34
-#define MOCK_LIGHT_SENSOR 1
+#define MOCK_LIGHT_SENSOR 0
 
 // ==================== CẤU HÌNH ESP-NOW ====================
-// BẮT BUỘC thay bằng địa chỉ MAC thật của YoloUNO để tính năng tự săn kênh hoạt động!
-// Ví dụ nếu YoloUNO in ra AA:BB:CC:DD:EE:FF thì điền {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}
+// Thay bằng địa chỉ MAC thật của YoloUNO (ESP32-S3)
 uint8_t S3_HUB_MAC[6] = {0x80, 0xB5, 0x4E, 0xE2, 0x01, 0x14};
 
 const char* TARGET_WIFI_SSID    = "TEN_WIFI_NHA_BAN";
-const uint8_t DEFAULT_WIFI_CHAN = 1; // Khớp với FALLBACK_CHANNEL của YoloUNO
+const uint8_t DEFAULT_WIFI_CHAN = 1; // Khớp FALLBACK_CHANNEL của YoloUNO
 
-// ==================== BIẾN TRẠNG THÁI CHUNG ====================
-bool relayState = false;
-bool awayMode   = false;
+// ==================== THÔNG SỐ THỜI GIAN ====================
+const uint32_t TELEMETRY_INTERVAL_MS  = 3000;
+const uint32_t BLE_RESCAN_INTERVAL_MS = 4000;
+const uint32_t BLE_SCAN_DURATION_MS   = 4000;
+
+// ==================== ĐỐI TƯỢNG ĐỒNG BỘ FREERTOS ====================
+SemaphoreHandle_t xStateMutex     = nullptr; // Bảo vệ trạng thái dùng chung
+SemaphoreHandle_t xButtonSem      = nullptr; // Đánh thức TaskButtonRelay từ ISR
+SemaphoreHandle_t xTxImmediateSem = nullptr; // Yêu cầu TaskEspNow gửi ngay lập tức
+QueueHandle_t     xRxCmdQueue     = nullptr; // Hàng đợi lệnh ESP-NOW từ S3
+
+// ==================== TRẠNG THÁI DÙNG CHUNG (BẢO VỆ BỞI xStateMutex) ====================
+struct NodeState {
+  bool  relayOn   = false;
+  bool  awayMode  = false;
+  float bleTemp   = 0.0f;
+  float bleHum    = 0.0f;
+  bool  bleOnline = false;
+} nodeState;
+
+// ==================== BIẾN NỘI BỘ ESP-NOW ====================
 uint16_t packetSeq = 0;
 uint8_t currentEspNowChannel = DEFAULT_WIFI_CHAN;
 
-// Chống dội nút bấm thủ công (có điện trở kéo lên ngoài -> nhấn = LOW)
-const unsigned long DEBOUNCE_MS = 50;
-bool lastButtonReading = HIGH;
-bool stableButtonState = HIGH;
-unsigned long lastDebounceTime = 0;
-
-// Chu kỳ gửi gói tin ESP-NOW định kỳ (3 giây)
-const unsigned long TELEMETRY_INTERVAL_MS = 3000;
-unsigned long lastTelemetryTime = 0;
-
-// Đồng bộ lệnh đến từ ESP-NOW
-portMUX_TYPE cmdMux = portMUX_INITIALIZER_UNLOCKED;
-volatile bool hasPendingCmd = false;
-EspNowPacket incomingCmd;
-
-// Theo dõi ACK phần cứng để tự săn kênh 1-13
-volatile bool espNowSendDone = false;
-volatile bool espNowLastOk   = false;
-volatile bool isHuntingChan  = false;
+volatile bool espNowSendDone     = false;
+volatile bool espNowLastOk       = false;
+volatile bool isHuntingChan      = false;
 volatile uint8_t espNowFailCount = 0;
 
-// ==================== BIẾN QUẢN LÝ BLE (NimBLE 2.x) ====================
-portMUX_TYPE bleMux = portMUX_INITIALIZER_UNLOCKED;
-float bleTemp   = 0.0f;
-float bleHum    = 0.0f;
-bool  bleOnline = false;
-
+// ==================== BIẾN NỘI BỘ BLE (NimBLE 2.x) ====================
 NimBLEClient* pBleClient = nullptr;
 NimBLEAddress targetBleAddr;
 volatile bool doBleConnect = false;
 volatile bool bleConnected = false;
 volatile bool bleScanning  = false;
-unsigned long lastBleScanAttempt = 0;
-const unsigned long BLE_RESCAN_INTERVAL_MS = 4000;
-const uint32_t BLE_SCAN_DURATION_MS = 4000;
+uint32_t lastBleScanAttempt = 0;
 
-// ==================== PHÂN TÍCH DỮ LIỆU BLE TỪ ESP32-C3 ====================
+// ==================== ĐIỀU KHIỂN RELAY & ĐỌC ÁNH SÁNG ====================
+// Chỉ gọi hàm này khi ĐÃ giữ xStateMutex
+void applyRelayLocked(bool turnOn) {
+  nodeState.relayOn = turnOn;
+  digitalWrite(PIN_RELAY, turnOn ? RELAY_ON : RELAY_OFF);
+  Serial.printf("[RELAY] Trang thai: %s (GPIO %d = %d)\n",
+                turnOn ? "BAT (ON)" : "TAT (OFF)",
+                PIN_RELAY,
+                turnOn ? RELAY_ON : RELAY_OFF);
+}
+
+uint16_t readLightLevel() {
+#if MOCK_LIGHT_SENSOR
+  static uint16_t mockLux = 350;
+  mockLux = (mockLux >= 750) ? 300 : (mockLux + 30);
+  return mockLux;
+#else
+  uint32_t sum = 0;
+  for (int i = 0; i < 8; i++) {
+    sum += analogRead(PIN_LIGHT_AO);
+  }
+  uint16_t raw = sum / 8;
+  uint16_t inverted = 4095 - raw;
+  return map(inverted, 0, 4095, 0, 1000);
+#endif
+}
+
+// ==================== NGẮT PHẦN CỨNG NÚT BẤM (IRAM_ATTR) ====================
+void IRAM_ATTR onButtonISR() {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  xSemaphoreGiveFromISR(xButtonSem, &xHigherPriorityTaskWoken);
+  if (xHigherPriorityTaskWoken == pdTRUE) {
+    portYIELD_FROM_ISR();
+  }
+}
+
+// ==================== TASK 1: NÚT BẤM & RELAY (CORE 1 - ƯU TIÊN 3) ====================
+void TaskButtonRelay(void* pvParameters) {
+  for (;;) {
+    // Ngủ hoàn toàn cho tới khi có cạnh xuống từ nút bấm
+    if (xSemaphoreTake(xButtonSem, portMAX_DELAY) == pdTRUE) {
+      // Chờ 25ms qua nhiễu dội tiếp điểm cơ khí (vẫn bắt kịp thao tác bấm nhanh)
+      vTaskDelay(pdMS_TO_TICKS(25));
+
+      if (digitalRead(PIN_BUTTON) == LOW) {
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+          Serial.println("[BUTTON] Nhan nut thu cong -> Dao trang thai Relay");
+          bool nextState = !nodeState.relayOn;
+          if (nextState) {
+            nodeState.awayMode = false; // Tự bật đèn thủ công thì hủy Away Mode
+          }
+          applyRelayLocked(nextState);
+          xSemaphoreGive(xStateMutex);
+        }
+
+        // Báo TaskEspNow gửi ngay gói tin đồng bộ lên YoloUNO
+        xSemaphoreGive(xTxImmediateSem);
+
+        // Chờ người dùng nhả nút để không kích đúp nếu giữ lâu
+        while (digitalRead(PIN_BUTTON) == LOW) {
+          vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        vTaskDelay(pdMS_TO_TICKS(30)); // Chống dội cạnh lên khi nhả nút
+      }
+
+      // Xóa mọi tín hiệu nhiễu phát sinh thêm trong lúc đang chống dội
+      xSemaphoreTake(xButtonSem, 0);
+    }
+  }
+}
+
+// ==================== XỬ LÝ BLE CLIENT (NimBLE 2.x) ====================
 void parseBlePayload(const uint8_t* data, size_t len, const char* tag) {
   char buf[32];
   size_t copyLen = (len < sizeof(buf) - 1) ? len : (sizeof(buf) - 1);
@@ -77,12 +146,12 @@ void parseBlePayload(const uint8_t* data, size_t len, const char* tag) {
 
   float t = 0.0f, h = 0.0f;
   if (sscanf(buf, "%f,%f", &t, &h) == 2) {
-    portENTER_CRITICAL(&bleMux);
-    bleTemp   = t;
-    bleHum    = h;
-    bleOnline = true;
-    portEXIT_CRITICAL(&bleMux);
-
+    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      nodeState.bleTemp   = t;
+      nodeState.bleHum    = h;
+      nodeState.bleOnline = true;
+      xSemaphoreGive(xStateMutex);
+    }
     Serial.printf("[BLE %s] Nhan tu C3: '%s' -> Temp=%.1f C | Hum=%.1f %%\n",
                   tag, buf, t, h);
   }
@@ -94,17 +163,18 @@ void bleNotifyCallback(NimBLERemoteCharacteristic* pChr, uint8_t* pData, size_t 
 
 class EnvClientCallbacks : public NimBLEClientCallbacks {
   void onConnect(NimBLEClient* pClient) override {
-    Serial.printf("[BLE] >>> DA KET NOI (BIND) THANH CONG toi %s!\n",
+    Serial.printf("[BLE] >>> DA KET NOI (BIND) toi %s!\n",
                   pClient->getPeerAddress().toString().c_str());
   }
 
   void onDisconnect(NimBLEClient* pClient, int reason) override {
     bleConnected = false;
-    portENTER_CRITICAL(&bleMux);
-    bleOnline = false;
-    portEXIT_CRITICAL(&bleMux);
+    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      nodeState.bleOnline = false;
+      xSemaphoreGive(xStateMutex);
+    }
     lastBleScanAttempt = millis();
-    Serial.printf("[BLE] Mat ket noi voi C3 (reason=%d) -> ble_online=0\n", reason);
+    Serial.printf("[BLE] Mat ket noi C3 (reason=%d) -> ble_online=0\n", reason);
   }
 };
 
@@ -185,44 +255,34 @@ bool connectToBleServer() {
   return true;
 }
 
-void initBleClient() {
+// ==================== TASK 2: QUẢN LÝ BLE CLIENT (CORE 0 - ƯU TIÊN 1) ====================
+void TaskBleClient(void* pvParameters) {
   NimBLEDevice::init("SmartHome_WROOM");
   NimBLEScan* pScan = NimBLEDevice::getScan();
   pScan->setScanCallbacks(&scanCallbacks, false);
   pScan->setInterval(100);
-  pScan->setWindow(45);
+  pScan->setWindow(45); // Nhường 55% thời gian sóng 2.4GHz cho ESP-NOW
   pScan->setActiveScan(true);
 
   startBleScan();
-}
 
-// ==================== ĐIỀU KHIỂN RELAY & ÁNH SÁNG ====================
-void applyRelay(bool turnOn) {
-  relayState = turnOn;
-  digitalWrite(PIN_RELAY, relayState ? RELAY_ON : RELAY_OFF);
-  Serial.printf("[RELAY] Trang thai: %s (GPIO %d = %d)\n",
-                relayState ? "BAT (ON)" : "TAT (OFF)",
-                PIN_RELAY,
-                relayState ? RELAY_ON : RELAY_OFF);
-}
+  for (;;) {
+    if (doBleConnect) {
+      doBleConnect = false;
+      // Lệnh này có thể block tối đa 5s nhưng chạy trên Core 0 -> KHÔNG ảnh hưởng nút bấm
+      if (!connectToBleServer()) {
+        lastBleScanAttempt = millis();
+      }
+    } else if (!bleConnected && !bleScanning && !isHuntingChan &&
+               (millis() - lastBleScanAttempt >= BLE_RESCAN_INTERVAL_MS)) {
+      startBleScan();
+    }
 
-uint16_t readLightLevel() {
-#if MOCK_LIGHT_SENSOR
-  static uint16_t mockLux = 350;
-  mockLux = (mockLux >= 750) ? 300 : (mockLux + 30);
-  return mockLux;
-#else
-  uint32_t sum = 0;
-  for (int i = 0; i < 8; i++) {
-    sum += analogRead(PIN_LIGHT_AO);
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
-  uint16_t raw = sum / 8;
-  uint16_t inverted = 4095 - raw;
-  return map(inverted, 0, 4095, 0, 1000);
-#endif
 }
 
-// ==================== ESP-NOW & TỰ SĂN KÊNH 1-13 ====================
+// ==================== XỬ LÝ ESP-NOW & TỰ SĂN KÊNH ====================
 bool isBroadcastMac(const uint8_t* mac) {
   for (int i = 0; i < 6; i++) {
     if (mac[i] != 0xFF) return false;
@@ -238,25 +298,24 @@ void lockEspNowChannel(uint8_t ch) {
 }
 
 EspNowPacket buildTelemetryPacket() {
-  float t, h;
-  bool online;
-  portENTER_CRITICAL(&bleMux);
-  t      = bleTemp;
-  h      = bleHum;
-  online = bleOnline;
-  portEXIT_CRITICAL(&bleMux);
+  NodeState snap;
+  if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    snap = nodeState;
+    xSemaphoreGive(xStateMutex);
+  }
 
   EspNowPacket pkt = {};
   pkt.node_id     = NODE_WROOM_ROOM;
   pkt.msg_type    = MSG_TELEMETRY;
   pkt.seq         = ++packetSeq;
-  pkt.temperature = t;
-  pkt.humidity    = h;
+  pkt.temperature = snap.bleTemp;
+  pkt.humidity    = snap.bleHum;
   pkt.light_lux   = readLightLevel();
-  pkt.switch_mask = relayState ? SW_BED_LIGHT_BIT : 0;
-  pkt.away_mode   = awayMode ? 1 : 0;
+  pkt.switch_mask = snap.relayOn ? SW_BED_LIGHT_BIT : 0;
+  pkt.away_mode   = snap.awayMode ? 1 : 0;
   pkt.alert_code  = ALERT_NONE;
-  pkt.ble_online  = online ? 1 : 0;
+  pkt.espnow_online = 1;
+  pkt.ble_online  = snap.bleOnline ? 1 : 0;
   return pkt;
 }
 
@@ -270,7 +329,7 @@ void sendTelemetryToHub() {
                 pkt.temperature,
                 pkt.humidity,
                 pkt.light_lux,
-                relayState ? "ON" : "OFF",
+                (pkt.switch_mask & SW_BED_LIGHT_BIT) ? "ON" : "OFF",
                 (res == ESP_OK) ? "OK" : "ERR");
 }
 
@@ -296,58 +355,53 @@ void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
 #else
 void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
 #endif
-  if (len != sizeof(EspNowPacket)) return;
-
-  portENTER_CRITICAL_ISR(&cmdMux);
-  memcpy(&incomingCmd, data, sizeof(EspNowPacket));
-  hasPendingCmd = true;
-  portEXIT_CRITICAL_ISR(&cmdMux);
+  if (len == sizeof(EspNowPacket) && xRxCmdQueue != nullptr) {
+    xQueueSend(xRxCmdQueue, data, 0);
+  }
 }
 
 void huntS3Channel() {
   if (isBroadcastMac(S3_HUB_MAC)) {
-    Serial.println("[CANH BAO] S3_HUB_MAC dang la broadcast FF:FF... -> Khong the tu san kenh!");
+    Serial.println("[CANH BAO] S3_HUB_MAC dang la broadcast FF:FF... -> Khong tu san kenh!");
     espNowFailCount = 0;
     return;
   }
 
   isHuntingChan = true;
 
-  // Tạm dừng quét BLE để dành toàn bộ sóng 2.4GHz cho việc dò kênh (~250ms)
   if (bleScanning) {
     NimBLEDevice::getScan()->stop();
     bleScanning = false;
   }
 
-  Serial.println("[ESP-NOW] Mat ACK 3 lan -> Bat dau tu do kenh 1..13 tim YoloUNO...");
+  Serial.println("[ESP-NOW] Mat ACK 3 lan -> Tu do kenh 1..13 tim YoloUNO...");
   EspNowPacket probe = buildTelemetryPacket();
 
   for (uint8_t ch = 1; ch <= 13; ch++) {
     lockEspNowChannel(ch);
-    delay(15);
+    vTaskDelay(pdMS_TO_TICKS(15));
 
     espNowSendDone = false;
     espNowLastOk   = false;
     esp_now_send(S3_HUB_MAC, (uint8_t*)&probe, sizeof(probe));
 
-    unsigned long t0 = millis();
+    uint32_t t0 = millis();
     while (!espNowSendDone && (millis() - t0 < 80)) {
-      delay(5);
+      vTaskDelay(pdMS_TO_TICKS(5));
     }
 
     if (espNowLastOk) {
-      Serial.printf("[ESP-NOW] >>> DA BAT LAI DUOC YOLOUNO O KENH %u!\n", ch);
+      Serial.printf("[ESP-NOW] >>> BAT LAI DUOC YOLOUNO O KENH %u!\n", ch);
       espNowFailCount = 0;
       isHuntingChan   = false;
       return;
     }
   }
 
-  // Nếu cả YoloUNO cũng đang tắt nguồn -> lùi về kênh mặc định 1
   lockEspNowChannel(DEFAULT_WIFI_CHAN);
   espNowFailCount = 0;
   isHuntingChan   = false;
-  Serial.printf("[ESP-NOW] Chua tim thay YoloUNO -> Tam dung o kenh %u.\n", DEFAULT_WIFI_CHAN);
+  Serial.printf("[ESP-NOW] Chua thay YoloUNO -> Tam dung o kenh %u.\n", DEFAULT_WIFI_CHAN);
 }
 
 uint8_t detectWiFiChannel(const char* ssid) {
@@ -384,7 +438,7 @@ void initEspNow() {
 
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, S3_HUB_MAC, 6);
-  peerInfo.channel = 0; // Dùng đúng kênh vừa khóa ở lockEspNowChannel()
+  peerInfo.channel = 0;
   peerInfo.ifidx   = WIFI_IF_STA;
   peerInfo.encrypt = false;
 
@@ -393,44 +447,44 @@ void initEspNow() {
   }
 }
 
-// ==================== NÚT BẤM THỦ CÔNG & LỆNH TỪ YOLOUNO ====================
-void handleManualButton() {
-  bool reading = digitalRead(PIN_BUTTON);
-  if (reading != lastButtonReading) {
-    lastDebounceTime = millis();
-  }
+// ==================== TASK 3: GIAO TIẾP ESP-NOW (CORE 1 - ƯU TIÊN 2) ====================
+void TaskEspNow(void* pvParameters) {
+  TickType_t lastTxTick = xTaskGetTickCount();
+  EspNowPacket cmd;
 
-  if ((millis() - lastDebounceTime) > DEBOUNCE_MS) {
-    if (reading != stableButtonState) {
-      stableButtonState = reading;
-      if (stableButtonState == LOW) {
-        Serial.println("[BUTTON] Nhan nut thu cong -> Dao trang thai Relay");
-        applyRelay(!relayState);
+  for (;;) {
+    // 1. Tự săn kênh 1-13 nếu mất ACK 3 lần liên tiếp
+    if (espNowFailCount >= 3) {
+      huntS3Channel();
+      lastTxTick = xTaskGetTickCount();
+    }
+
+    // 2. Chờ lệnh từ YoloUNO (tối đa 20ms để vòng lặp luôn nhẹ CPU)
+    if (xQueueReceive(xRxCmdQueue, &cmd, pdMS_TO_TICKS(20)) == pdTRUE) {
+      if (cmd.msg_type == MSG_COMMAND) {
+        if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+          nodeState.awayMode = (cmd.away_mode != 0);
+          if (nodeState.awayMode) {
+            applyRelayLocked(false);
+          } else {
+            bool targetState = (cmd.switch_mask & SW_BED_LIGHT_BIT) != 0;
+            applyRelayLocked(targetState);
+          }
+          xSemaphoreGive(xStateMutex);
+        }
         sendTelemetryToHub();
+        lastTxTick = xTaskGetTickCount();
       }
     }
-  }
-  lastButtonReading = reading;
-}
 
-void handleIncomingCommand() {
-  if (!hasPendingCmd) return;
+    // 3. Gửi telemetry ngay nếu nút bấm vừa đổi Relay, hoặc đúng chu kỳ 3 giây
+    bool immediateTx = (xSemaphoreTake(xTxImmediateSem, 0) == pdTRUE);
+    bool periodicTx  = ((xTaskGetTickCount() - lastTxTick) >= pdMS_TO_TICKS(TELEMETRY_INTERVAL_MS));
 
-  EspNowPacket cmd;
-  portENTER_CRITICAL(&cmdMux);
-  memcpy(&cmd, &incomingCmd, sizeof(EspNowPacket));
-  hasPendingCmd = false;
-  portEXIT_CRITICAL(&cmdMux);
-
-  if (cmd.msg_type == MSG_COMMAND) {
-    awayMode = (cmd.away_mode != 0);
-    if (awayMode) {
-      applyRelay(false);
-    } else {
-      bool targetState = (cmd.switch_mask & SW_BED_LIGHT_BIT) != 0;
-      applyRelay(targetState);
+    if (immediateTx || periodicTx) {
+      lastTxTick = xTaskGetTickCount();
+      sendTelemetryToHub();
     }
-    sendTelemetryToHub();
   }
 }
 
@@ -439,44 +493,37 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
+  // Ghi sẵn mức TẮT trước khi set OUTPUT tránh relay kêu lúc cấp nguồn
   digitalWrite(PIN_RELAY, RELAY_OFF);
   pinMode(PIN_RELAY, OUTPUT);
+
+  // Nút bấm có điện trở kéo lên ngoài
   pinMode(PIN_BUTTON, INPUT);
 
   analogReadResolution(12);
   analogSetPinAttenuation(PIN_LIGHT_AO, ADC_11db);
 
-  // Bắt buộc khởi tạo ESP-NOW trước rồi mới bật NimBLE
-  initEspNow();
-  initBleClient();
+  // Tạo các đối tượng đồng bộ FreeRTOS trước khi gắn ngắt và khởi tạo Task
+  xStateMutex     = xSemaphoreCreateMutex();
+  xButtonSem      = xSemaphoreCreateBinary();
+  xTxImmediateSem = xSemaphoreCreateBinary();
+  xRxCmdQueue     = xQueueCreate(6, sizeof(EspNowPacket));
 
-  Serial.println("[SYSTEM] ESP32-WROOM san sang (BLE + ESP-NOW Self-Healing + Relay)!");
+  // Gắn ngắt cạnh xuống cho nút bấm (phản hồi tức thời)
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), onButtonISR, FALLING);
+
+  // Khởi tạo Wi-Fi/ESP-NOW trước rồi mới bật Task BLE
+  initEspNow();
+
+  // Khởi chạy 3 Task FreeRTOS ghim rõ từng nhân
+  xTaskCreatePinnedToCore(TaskButtonRelay, "BtnRelay", 2048, nullptr, 1, nullptr, 1);
+  xTaskCreatePinnedToCore(TaskEspNow,      "EspNow",   4096, nullptr, 2, nullptr, 1);
+  xTaskCreatePinnedToCore(TaskBleClient,   "BleCli",   6144, nullptr, 1, nullptr, 0);
+
+  Serial.println("[SYSTEM] ESP32-WROOM FreeRTOS san sang (3 Tasks | Dual-Core)!");
 }
 
 void loop() {
-  // 1. Tự săn kênh 1-13 nếu mất ACK 3 gói liên tiếp từ YoloUNO
-  if (espNowFailCount >= 3) {
-    huntS3Channel();
-  }
-
-  // 2. Quản lý kết nối BLE với ESP32-C3 Mini
-  if (doBleConnect) {
-    doBleConnect = false;
-    if (!connectToBleServer()) {
-      lastBleScanAttempt = millis();
-    }
-  } else if (!bleConnected && !bleScanning &&
-             (millis() - lastBleScanAttempt >= BLE_RESCAN_INTERVAL_MS)) {
-    startBleScan();
-  }
-
-  // 3. Xử lý nút bấm thủ công & lệnh từ YoloUNO
-  handleManualButton();
-  handleIncomingCommand();
-
-  // 4. Đẩy dữ liệu định kỳ mỗi 3 giây
-  if (millis() - lastTelemetryTime >= TELEMETRY_INTERVAL_MS) {
-    lastTelemetryTime = millis();
-    sendTelemetryToHub();
-  }
+  // Xóa loopTask mặc định của Arduino để tiết kiệm ~8KB RAM
+  vTaskDelete(NULL);
 }
