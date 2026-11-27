@@ -40,7 +40,7 @@ static void on_alert_close(lv_event_t *e) {
 
 static void on_test_alert_btn(lv_event_t *e) {
   LV_UNUSED(e);
-  ui_panel_show_alert("CANH BAO NHIET DO", "Nhiet do vuot nguong 35.0 C!\nDa bat quat/relay lam mat.");
+  ui_panel_show_alert("Temperature alert", "Temperature exceeded threshold 35.0 C!\nRelay/fan has been activated.");
 }
 
 static lv_obj_t *create_sensor_card(lv_obj_t *parent, int y, const char *title,
