@@ -6,12 +6,13 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include "espnow_protocol.h"
 #include "ui_panel.h"
 
 // =========================================================================
-// CHUYEN CHE DO: 1 = Tu gia lap du lieu test UI | 0 = Chay ESP-NOW voi TV1
+// 1 = Tu gia lap test man hinh | 0 = Chay ESP-NOW that voi ESP32-S3 (Mem1)
 // =========================================================================
-#define USE_MOCK_DATA 1
+#define USE_MOCK_DATA 0
 
 // Cau hinh phan cung ESP32-2432S028 (CYD 2.8")
 #define SCREEN_WIDTH  320
@@ -24,36 +25,26 @@
 #define XPT2046_CLK   25
 #define XPT2046_CS    33
 
-// Cau hinh ESP-NOW (T06) - Thay dung MAC va Kenh Wi-Fi cua ESP32-S3 (TV1)
-static uint8_t S3_HUB_MAC[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
-static const uint8_t ESPNOW_WIFI_CHANNEL = 1;
-
-// Struct giao tiep tam (khi merge se thay bang #include "espnow_protocol.h")
-typedef struct __attribute__((packed)) {
-  float temperature;
-  float humidity;
-  int32_t lightLux;
-  bool relayState;
-  bool hasAlert;
-  char alertMsg[64];
-} TelemetryPacket;
-
-typedef struct __attribute__((packed)) {
-  uint8_t cmdType;   // 1 = SET_RELAY
-  bool relayTarget;
-} ControlPacket;
+// MAC that cua ESP32-S3 (YoloUNO - Mem1) & Kenh Wi-Fi dong bo
+static uint8_t S3_HUB_MAC[6] = {0x80, 0xB5, 0x4E, 0xE2, 0x01, 0x14};
+static uint8_t g_espnowChannel = 6;
+static volatile bool g_sendDone = false;
+static volatile bool g_lastSendOk = false;
 
 TFT_eSPI tft = TFT_eSPI();
-
 XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
 
 static lv_disp_draw_buf_t draw_buf;
 static lv_color_t buf[SCREEN_WIDTH * 20];
 
-// Co dong bo giua callback ESP-NOW va loop() cua LVGL
-static volatile bool g_hasNewTelemetry = false;
-static TelemetryPacket g_rxPacket = {};
+// Dong bo du lieu giua callback ESP-NOW va loop() cua LVGL
+static volatile bool g_hasNewPacket = false;
+static EspNowPacket g_rxPacket = {};
 static uint32_t g_lastRxMs = 0;
+static uint16_t g_txSeq = 0;
+static bool g_currentRelayState = false;
+static uint8_t g_currentAwayMode = 0;
+static char g_hubWifiSsid[32] = "";
 
 // -------------------- Driver Hien thi & Cam ung LVGL --------------------
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
@@ -82,41 +73,109 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
   }
 }
 
-// -------------------- Xu ly ESP-NOW (T06 - Core 2.x) --------------------
+// -------------------- Xu ly ESP-NOW (T06 - chuan espnow_protocol.h) --------------------
+static const char *getAlertTitle(uint8_t code) {
+  switch (code) {
+    case ALERT_INTRUSION:       return "INTRUSION ALERT";
+    case ALERT_FIRE:            return "FIRE ALERT";
+    case ALERT_TEMP_HIGH:       return "HIGH TEMPERATURE ALERT";
+    case ALERT_GATEWAY_OFFLINE: return "GATEWAY OFFLINE ALERT";
+    default:                    return "SYSTEM ALERT";
+  }
+}
+
 void onEspNowRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
   LV_UNUSED(mac);
-  if (len == (int)sizeof(TelemetryPacket)) {
-    memcpy((void *)&g_rxPacket, incomingData, sizeof(TelemetryPacket));
-    g_rxPacket.alertMsg[sizeof(g_rxPacket.alertMsg) - 1] = '\0';
-    g_hasNewTelemetry = true;
+  if (len == (int)sizeof(EspNowPacket)) {
+    memcpy((void *)&g_rxPacket, incomingData, sizeof(EspNowPacket));
+    g_rxPacket.alert_msg[sizeof(g_rxPacket.alert_msg) - 1] = '\0';
+    g_hasNewPacket = true;
     g_lastRxMs = millis();
   }
 }
 
 void onEspNowSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   LV_UNUSED(mac_addr);
-  Serial.printf("[ESP-NOW] Send status: %s\n",
-                status == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
+  g_lastSendOk = (status == ESP_NOW_SEND_SUCCESS);
+  g_sendDone = true;
+  Serial.printf("[ESP-NOW] Send status (CH %d): %s\n",
+                g_espnowChannel, g_lastSendOk ? "OK" : "FAIL");
+}
+
+static void sendCommandPacket() {
+#if !USE_MOCK_DATA
+  EspNowPacket cmd = {};
+  cmd.node_id     = NODE_LVGL_PANEL;
+  cmd.msg_type    = MSG_COMMAND;
+  cmd.seq         = ++g_txSeq;
+  cmd.switch_mask = g_currentRelayState ? SW_BED_LIGHT_BIT : 0;
+  cmd.away_mode   = g_currentAwayMode;
+
+  esp_now_send(S3_HUB_MAC, (uint8_t *)&cmd, sizeof(cmd));
+#endif
 }
 
 void onUserToggleRelay(bool newState) {
-  Serial.printf("[UI] Relay toggled -> %s\n", newState ? "ON" : "OFF");
-#if !USE_MOCK_DATA
-  ControlPacket cmd = {};
-  cmd.cmdType = 1;
-  cmd.relayTarget = newState;
-  esp_now_send(S3_HUB_MAC, (uint8_t *)&cmd, sizeof(cmd));
-#endif
+  g_currentRelayState = newState;
+  Serial.printf("[UI] Bed Light -> %s\n", newState ? "ON" : "OFF");
+  sendCommandPacket();
+}
+
+void onUserToggleAwayMode(bool awayMode) {
+  g_currentAwayMode = awayMode ? 1 : 0;
+  Serial.printf("[UI] Away Mode -> %s\n", awayMode ? "AWAY" : "HOME");
+  sendCommandPacket();
+}
+
+static void applyEspNowChannel(uint8_t ch) {
+  g_espnowChannel = ch;
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+
+  esp_now_del_peer(S3_HUB_MAC);
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, S3_HUB_MAC, 6);
+  peerInfo.channel = ch;
+  peerInfo.ifidx   = WIFI_IF_STA;
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
+}
+
+static bool autoScanEspNowChannel() {
+  Serial.println("[ESP-NOW] Auto-scanning Wi-Fi channel (1-13)...");
+  uint8_t prevCh = g_espnowChannel;
+  EspNowPacket ping = {};
+  ping.node_id  = NODE_LVGL_PANEL;
+  ping.msg_type = MSG_STATE_SYNC; // Goi tham do, khong lam doi trang thai Relay
+
+  for (uint8_t ch = 1; ch <= 13; ch++) {
+    applyEspNowChannel(ch);
+
+    g_sendDone = false;
+    g_lastSendOk = false;
+    esp_now_send(S3_HUB_MAC, (uint8_t *)&ping, sizeof(ping));
+
+    uint32_t t0 = millis();
+    while (!g_sendDone && (millis() - t0 < 80)) {
+      delay(2);
+    }
+
+    if (g_lastSendOk) {
+      Serial.printf("[ESP-NOW] Locked on S3 Hub channel: %d\n", ch);
+      return true;
+    }
+  }
+
+  applyEspNowChannel(prevCh);
+  Serial.println("[ESP-NOW] S3 Hub not found on channels 1-13.");
+  return false;
 }
 
 void initEspNow() {
   WiFi.mode(WIFI_STA);
   Serial.print("[ESP-NOW] Panel MAC: ");
   Serial.println(WiFi.macAddress());
-
-  esp_wifi_set_promiscuous(true);
-  esp_wifi_set_channel(ESPNOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
-  esp_wifi_set_promiscuous(false);
 
   if (esp_now_init() != ESP_OK) {
     Serial.println("[ESP-NOW] Init failed!");
@@ -125,14 +184,22 @@ void initEspNow() {
   esp_now_register_recv_cb(onEspNowRecv);
   esp_now_register_send_cb(onEspNowSent);
 
-  esp_now_peer_info_t peerInfo = {};
-  memcpy(peerInfo.peer_addr, S3_HUB_MAC, 6);
-  peerInfo.channel = ESPNOW_WIFI_CHANNEL;
-  peerInfo.encrypt = false;
-  esp_now_add_peer(&peerInfo);
+  // Tu dong do kenh ngay luc khoi dong
+  if (!autoScanEspNowChannel()) {
+    applyEspNowChannel(g_espnowChannel); // Giu kenh mac dinh neu S3 chua bat
+  }
 }
 
 // -------------------- Setup & Loop --------------------
+static void refreshSysInfoUi() {
+  char hubMacStr[18];
+  snprintf(hubMacStr, sizeof(hubMacStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+           S3_HUB_MAC[0], S3_HUB_MAC[1], S3_HUB_MAC[2],
+           S3_HUB_MAC[3], S3_HUB_MAC[4], S3_HUB_MAC[5]);
+  ui_panel_set_sys_info(g_hubWifiSsid[0] ? g_hubWifiSsid : "--",
+                        g_espnowChannel, WiFi.macAddress().c_str(), hubMacStr);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -165,15 +232,17 @@ void setup() {
   indev_drv.read_cb = my_touchpad_read;
   lv_indev_drv_register(&indev_drv);
 
-  ui_panel_init(onUserToggleRelay, USE_MOCK_DATA == 1);
+  ui_panel_init(onUserToggleRelay, onUserToggleAwayMode , USE_MOCK_DATA == 1);
 
 #if USE_MOCK_DATA
-  ui_panel_set_connection(true, true);
-  ui_panel_update_sensors(28.5f, 65.0f, 420, false);
+  ui_panel_set_net_status(NET_MOCK);
+  refreshSysInfoUi();
+  ui_panel_update_sensors(28.5f, 65.0f, 420, false, false);
   Serial.println("LVGL Panel Ready (MOCK MODE)");
 #else
   initEspNow();
-  ui_panel_set_connection(false, false);
+  ui_panel_set_net_status(NET_OFFLINE);
+  refreshSysInfoUi();
   Serial.println("LVGL Panel Ready (ESP-NOW MODE)");
 #endif
 }
@@ -193,22 +262,87 @@ void loop() {
     lastMockMs = millis();
     mockTemp += 0.4f;
     if (mockTemp > 36.0f) mockTemp = 28.0f;
-    ui_panel_update_sensors(mockTemp, 62.5f, 380 + (int)(mockTemp * 5), mockTemp > 33.0f);
+    ui_panel_update_sensors(mockTemp, 62.5f, 380 + (int)(mockTemp * 5),
+                            g_currentRelayState, g_currentAwayMode != 0);
   }
 #else
-  if (g_hasNewTelemetry) {
-    g_hasNewTelemetry = false;
-    TelemetryPacket pkt;
+  if (g_hasNewPacket) {
+    g_hasNewPacket = false;
+    EspNowPacket pkt;
     memcpy(&pkt, (const void *)&g_rxPacket, sizeof(pkt));
 
-    ui_panel_set_connection(true, false);
-    ui_panel_update_sensors(pkt.temperature, pkt.humidity, pkt.lightLux, pkt.relayState);
-    if (pkt.hasAlert && pkt.alertMsg[0] != '\0') {
-      ui_panel_show_alert("SYSTEM ALERT", pkt.alertMsg);
+    bool relayOn = (pkt.switch_mask & SW_BED_LIGHT_BIT) != 0;
+    g_currentRelayState = relayOn;
+    g_currentAwayMode   = pkt.away_mode;
+
+    // Phan biet Online + MQTT bat vs Online + MQTT tat
+    if (pkt.alert_code == ALERT_GATEWAY_OFFLINE) {
+      ui_panel_set_net_status(NET_ONLINE_NO_MQTT);
+    } else {
+      ui_panel_set_net_status(NET_ONLINE_MQTT);
+    }
+
+    if (pkt.msg_type == MSG_STATE_SYNC &&
+        (pkt.alert_code == ALERT_NONE || pkt.alert_code == ALERT_GATEWAY_OFFLINE)) {
+      unsigned int hubCh = 0;
+      char hubSsid[32] = "";
+      if (sscanf(pkt.alert_msg, "%u|%31[^\n]", &hubCh, hubSsid) == 2) {
+        bool infoChanged = (strcmp(g_hubWifiSsid, hubSsid) != 0);
+        if (hubCh >= 1 && hubCh <= 13 && g_espnowChannel != (uint8_t)hubCh) {
+          Serial.printf("[ESP-NOW] Dong bo kenh theo Hub: %u -> %u\n",
+                        g_espnowChannel, hubCh);
+          applyEspNowChannel((uint8_t)hubCh);
+          infoChanged = true;
+        }
+        if (infoChanged) {
+          strncpy(g_hubWifiSsid, hubSsid, sizeof(g_hubWifiSsid) - 1);
+          g_hubWifiSsid[sizeof(g_hubWifiSsid) - 1] = '\0';
+          refreshSysInfoUi();
+        }
+      }
+    }
+
+    if (pkt.msg_type == MSG_STATE_SYNC || pkt.msg_type == MSG_TELEMETRY) {
+      ui_panel_update_sensors(pkt.temperature, pkt.humidity, pkt.light_lux,
+                              relayOn, pkt.away_mode != 0,
+                              pkt.ble_online != 0, pkt.espnow_online != 0);
+    }
+
+    if (pkt.msg_type == MSG_ALERT || (pkt.alert_code != ALERT_NONE && pkt.alert_code != ALERT_GATEWAY_OFFLINE)) {
+      const char *msg = (pkt.alert_msg[0] != '\0') ? pkt.alert_msg : "Check system immediately!";
+      ui_panel_show_alert(getAlertTitle(pkt.alert_code), msg);
     }
   }
-  if (g_lastRxMs > 0 && (millis() - g_lastRxMs > 10000)) {
-    ui_panel_set_connection(false, false);
+
+  // Cap nhat Last data timestamp moi 1 giay
+  static uint32_t lastTsUiMs = 0;
+  if (millis() - lastTsUiMs >= 1000) {
+    lastTsUiMs = millis();
+    if (g_lastRxMs > 0) {
+      ui_panel_update_last_data((millis() - g_lastRxMs) / 1000, true);
+    } else {
+      ui_panel_update_last_data(0, false);
+    }
+  }
+
+  static uint32_t lastRescanMs = 0;
+  bool isOffline = (g_lastRxMs == 0) || (millis() - g_lastRxMs > 10000);
+
+  if (isOffline) {
+    if (g_hubWifiSsid[0] != '\0') {
+      g_hubWifiSsid[0] = '\0';
+      refreshSysInfoUi();
+    }
+    ui_panel_set_net_status(NET_OFFLINE);
+    ui_panel_clear_sensors();
+
+    if (millis() - lastRescanMs > 8000) {
+      lastRescanMs = millis();
+      if (autoScanEspNowChannel()) {
+        g_lastRxMs = millis();
+        refreshSysInfoUi(); // Cap nhat lai so Channel moi tim duoc
+      }
+    }
   }
 #endif
 

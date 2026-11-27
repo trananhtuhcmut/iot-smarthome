@@ -66,6 +66,7 @@ void setNetState(NetState nextState) {
                   netStateToStr(nextState));
     currentNetState = nextState;
     notifyWebClients();
+    queueEspNowAction(TX_SYNC_LVGL);
   }
 }
 
