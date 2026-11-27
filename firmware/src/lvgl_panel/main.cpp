@@ -44,6 +44,7 @@ static uint32_t g_lastRxMs = 0;
 static uint16_t g_txSeq = 0;
 static bool g_currentRelayState = false;
 static uint8_t g_currentAwayMode = 0;
+static char g_hubWifiSsid[32] = "";
 
 // -------------------- Driver Hien thi & Cam ung LVGL --------------------
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
@@ -136,12 +137,14 @@ static void applyEspNowChannel(uint8_t ch) {
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, S3_HUB_MAC, 6);
   peerInfo.channel = ch;
+  peerInfo.ifidx   = WIFI_IF_STA;
   peerInfo.encrypt = false;
   esp_now_add_peer(&peerInfo);
 }
 
 static bool autoScanEspNowChannel() {
   Serial.println("[ESP-NOW] Auto-scanning Wi-Fi channel (1-13)...");
+  uint8_t prevCh = g_espnowChannel;
   EspNowPacket ping = {};
   ping.node_id  = NODE_LVGL_PANEL;
   ping.msg_type = MSG_STATE_SYNC; // Goi tham do, khong lam doi trang thai Relay
@@ -164,6 +167,7 @@ static bool autoScanEspNowChannel() {
     }
   }
 
+  applyEspNowChannel(prevCh);
   Serial.println("[ESP-NOW] S3 Hub not found on channels 1-13.");
   return false;
 }
@@ -192,7 +196,8 @@ static void refreshSysInfoUi() {
   snprintf(hubMacStr, sizeof(hubMacStr), "%02X:%02X:%02X:%02X:%02X:%02X",
            S3_HUB_MAC[0], S3_HUB_MAC[1], S3_HUB_MAC[2],
            S3_HUB_MAC[3], S3_HUB_MAC[4], S3_HUB_MAC[5]);
-  ui_panel_set_sys_info("--", g_espnowChannel, WiFi.macAddress().c_str(), hubMacStr);
+  ui_panel_set_sys_info(g_hubWifiSsid[0] ? g_hubWifiSsid : "--",
+                        g_espnowChannel, WiFi.macAddress().c_str(), hubMacStr);
 }
 
 void setup() {
@@ -277,6 +282,26 @@ void loop() {
       ui_panel_set_net_status(NET_ONLINE_MQTT);
     }
 
+    if (pkt.msg_type == MSG_STATE_SYNC &&
+        (pkt.alert_code == ALERT_NONE || pkt.alert_code == ALERT_GATEWAY_OFFLINE)) {
+      unsigned int hubCh = 0;
+      char hubSsid[32] = "";
+      if (sscanf(pkt.alert_msg, "%u|%31[^\n]", &hubCh, hubSsid) == 2) {
+        bool infoChanged = (strcmp(g_hubWifiSsid, hubSsid) != 0);
+        if (hubCh >= 1 && hubCh <= 13 && g_espnowChannel != (uint8_t)hubCh) {
+          Serial.printf("[ESP-NOW] Dong bo kenh theo Hub: %u -> %u\n",
+                        g_espnowChannel, hubCh);
+          applyEspNowChannel((uint8_t)hubCh);
+          infoChanged = true;
+        }
+        if (infoChanged) {
+          strncpy(g_hubWifiSsid, hubSsid, sizeof(g_hubWifiSsid) - 1);
+          g_hubWifiSsid[sizeof(g_hubWifiSsid) - 1] = '\0';
+          refreshSysInfoUi();
+        }
+      }
+    }
+
     if (pkt.msg_type == MSG_STATE_SYNC || pkt.msg_type == MSG_TELEMETRY) {
       ui_panel_update_sensors(pkt.temperature, pkt.humidity, pkt.light_lux,
                               relayOn, pkt.away_mode != 0,
@@ -304,6 +329,10 @@ void loop() {
   bool isOffline = (g_lastRxMs == 0) || (millis() - g_lastRxMs > 10000);
 
   if (isOffline) {
+    if (g_hubWifiSsid[0] != '\0') {
+      g_hubWifiSsid[0] = '\0';
+      refreshSysInfoUi();
+    }
     ui_panel_set_net_status(NET_OFFLINE);
     ui_panel_clear_sensors();
 

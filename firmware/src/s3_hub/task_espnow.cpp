@@ -106,6 +106,24 @@ static void executeEspNowTx(EspNowTxAction action) {
     if (currentNetState != NET_ONLINE) {
       pkt.alert_code = ALERT_GATEWAY_OFFLINE;
     }
+    if (pkt.alert_code == ALERT_NONE || pkt.alert_code == ALERT_GATEWAY_OFFLINE) {
+      uint8_t ch = 0;
+      char ssidBuf[28] = "--";
+      if (currentNetState == NET_WIFI_OFFLINE_AP) {
+        ch = FALLBACK_CHANNEL;
+        snprintf(ssidBuf, sizeof(ssidBuf), "AP:%s", FALLBACK_AP_SSID);
+      } else if (WiFi.status() == WL_CONNECTED) {
+        ch = (uint8_t)WiFi.channel();
+        String s = WiFi.SSID();
+        if (s.length() > 0) {
+          snprintf(ssidBuf, sizeof(ssidBuf), "%s", s.c_str());
+        }
+      } else {
+        ch = (uint8_t)WiFi.channel();
+        snprintf(ssidBuf, sizeof(ssidBuf), "Connecting...");
+      }
+      snprintf(pkt.alert_msg, sizeof(pkt.alert_msg), "%u|%s", ch, ssidBuf);
+    }
     pkt.msg_type = MSG_STATE_SYNC;
     sendEspNowToPeer(lvglMac, hasLvglMac, pkt, "LVGL", 2);
   } else if (action == TX_ALERT_LVGL) {
