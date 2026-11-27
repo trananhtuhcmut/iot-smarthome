@@ -103,6 +103,9 @@ static void executeEspNowTx(EspNowTxAction action) {
     pkt.msg_type = MSG_COMMAND;
     sendEspNowToPeer(wroomMac, hasWroomMac, pkt, "WROOM", 5);
   } else if (action == TX_SYNC_LVGL) {
+    if (currentNetState != NET_ONLINE) {
+      pkt.alert_code = ALERT_GATEWAY_OFFLINE;
+    }
     pkt.msg_type = MSG_STATE_SYNC;
     sendEspNowToPeer(lvglMac, hasLvglMac, pkt, "LVGL", 2);
   } else if (action == TX_ALERT_LVGL) {
@@ -199,6 +202,8 @@ void TaskEspNow(void* pvParameters) {
           notifyWebClients();
           executeEspNowTx(TX_CMD_WROOM);
           xSemaphoreGive(xMqttPubTelemetrySem);
+        } else if (p.msg_type == MSG_STATE_SYNC) {
+          executeEspNowTx(TX_SYNC_LVGL);
         }
       }
     }

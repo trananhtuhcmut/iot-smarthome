@@ -283,7 +283,7 @@ void loop() {
                               pkt.ble_online != 0, pkt.espnow_online != 0);
     }
 
-    if (pkt.msg_type == MSG_ALERT || pkt.alert_code != ALERT_NONE && pkt.alert_code != ALERT_GATEWAY_OFFLINE) {
+    if (pkt.msg_type == MSG_ALERT || (pkt.alert_code != ALERT_NONE && pkt.alert_code != ALERT_GATEWAY_OFFLINE)) {
       const char *msg = (pkt.alert_msg[0] != '\0') ? pkt.alert_msg : "Check system immediately!";
       ui_panel_show_alert(getAlertTitle(pkt.alert_code), msg);
     }
