@@ -112,27 +112,32 @@ class LocalIoTGateway:
 
     def _handle_bedroom_telemetry(self, data: dict):
         """
-        Tách gói smarthome/bedroom/telemetry thành 3 thiết bị trên CoreIOT:
-          - Bedroom_Node: espnow_online, light, sw1_bed_light
-          - BLE_Env_Sensor: temperature, humidity, ble_online
-          - YoloUNO_Hub: away_mode
+        Tách gói smarthome/bedroom/telemetry thành 3 thiết bị trên CoreIOT.
+        Chỉ đẩy giá trị cảm biến khi tầng truyền tương ứng (ESP-NOW / BLE) đang online
+        để tránh vẽ đường ngang giá trị cũ hoặc tụt về 0.0 khi rút nguồn node con.
         """
         ts_ms = normalize_ts_ms(data.get("ts"))
         switches = data.get("switches", {})
 
-        # [MỚI] Đầy đủ espnow_online, light, sw1_bed_light cho Bedroom_Node
+        espnow_ok = bool(data.get("espnow_online", True))
+        ble_ok = espnow_ok and bool(data.get("ble_online", False))
+
         bedroom_values = {}
         if "espnow_online" in data:
-            bedroom_values["espnow_online"] = bool(data["espnow_online"])
-        if "light" in data:
-            bedroom_values["light"] = data["light"]
-        if "sw1_bed_light" in switches:
-            bedroom_values["sw1_bed_light"] = bool(switches["sw1_bed_light"])
+            bedroom_values["espnow_online"] = espnow_ok
+        if espnow_ok:
+            if "light" in data:
+                bedroom_values["light"] = data["light"]
+            if "sw1_bed_light" in switches:
+                bedroom_values["sw1_bed_light"] = bool(switches["sw1_bed_light"])
 
         ble_values = {}
-        for ble_key in ("temperature", "humidity", "ble_online"):
-            if ble_key in data:
-                ble_values[ble_key] = data[ble_key]
+        if "ble_online" in data:
+            ble_values["ble_online"] = ble_ok
+        if ble_ok:
+            for ble_key in ("temperature", "humidity"):
+                if ble_key in data:
+                    ble_values[ble_key] = data[ble_key]
 
         cloud_payload = {}
         if bedroom_values:
@@ -248,25 +253,27 @@ class LocalIoTGateway:
         data = rpc.get("data", {})
         req_id = data.get("id")
         method = data.get("method")
-        params = data.get("params", {}) or {}
+
+        raw_params = data.get("params")
+        params = raw_params if isinstance(raw_params, dict) else {}
 
         ok = False
-        # 1. Bật/tắt đèn phòng ngủ (setSwitch)
+        # 1. Bật/tắt đèn phòng ngủ (setSwitch) - hỗ trợ cả dict lẫn bool
         if device == "Bedroom_Node" and method == "setSwitch":
+            state_val = raw_params if isinstance(raw_params, bool) else bool(params.get("state"))
             local_cmd = {
                 "target": "Bedroom_Node",
                 "switch": params.get("switch", "sw1_bed_light"),
-                "state": bool(params.get("state")),
+                "state": state_val,
                 "source": "coreiot",
             }
             self.local_client.publish(TOPIC_CMD_SWITCH, json.dumps(local_cmd), qos=1)
             print(f"[GATEWAY] -> Đẩy xuống {TOPIC_CMD_SWITCH}: {local_cmd}")
             ok = True
 
-        # 2. Bật/tắt chế độ Ra khỏi nhà (setAwayMode)
+        # 2. Bật/tắt chế độ Ra khỏi nhà (setAwayMode) - hỗ trợ cả dict lẫn bool
         elif device == "YoloUNO_Hub" and method == "setAwayMode":
-            away = bool(params.get("away_mode"))
-            # [MỚI] Dùng đúng key "turn_off_light" theo Hợp đồng 2 & 3 mới
+            away = raw_params if isinstance(raw_params, bool) else bool(params.get("away_mode"))
             local_cmd = {
                 "away_mode": away,
                 "turn_off_light": away,
@@ -276,10 +283,10 @@ class LocalIoTGateway:
             print(f"[GATEWAY] -> Đẩy xuống {TOPIC_CMD_MODE}: {local_cmd}")
             ok = True
 
-        # 3. Xác nhận tắt cảnh báo AI (ackAlert)
+        # 3. Xác nhận tắt cảnh báo AI (ackAlert) - hỗ trợ cả dict, bool lẫn None
         elif device == "Edge_AI_Cam" and method == "ackAlert":
-            if params.get("clear", True):
-                # [MỚI] Bỏ "buzzer", dùng message "OK" đúng Hợp đồng 3 mục 3
+            should_clear = raw_params if isinstance(raw_params, bool) else bool(params.get("clear", True))
+            if should_clear:
                 local_cmd = {
                     "alert_code": 0,
                     "event": "clear",
@@ -297,7 +304,7 @@ class LocalIoTGateway:
             resp = {
                 "device": device,
                 "id": req_id,
-                "data": {"success": ok},  # [MỚI] Khớp mục 4 Hợp đồng 3
+                "data": {"success": ok},
             }
             client.publish(CLOUD_TOPIC_RPC, json.dumps(resp), qos=1)
 
@@ -350,7 +357,8 @@ class LocalIoTGateway:
         worker_thread = threading.Thread(target=self._cloud_sync_worker, daemon=True)
         worker_thread.start()
 
-        self.local_client.connect(LOCAL_MQTT_HOST, LOCAL_MQTT_PORT, keepalive=15)
+        self.local_client.reconnect_delay_set(min_delay=1, max_delay=10)
+        self.local_client.connect_async(LOCAL_MQTT_HOST, LOCAL_MQTT_PORT, keepalive=15)
         self.local_client.loop_start()
 
         if COREIOT_TOKEN and COREIOT_TOKEN != "DIEN_ACCESS_TOKEN_GATEWAY_VAO_DAY":

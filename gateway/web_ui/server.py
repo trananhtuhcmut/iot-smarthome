@@ -173,23 +173,35 @@ def on_mqtt_message(client, userdata, msg):
 
     if topic == TOPIC_TELEMETRY:
         switches = data.get("switches", {})
-        state["bedroom"]["espnow_online"] = bool(data.get("espnow_online", True))
-        state["bedroom"]["ble_online"] = bool(data.get("ble_online", True))
-        state["bedroom"]["temperature"] = data.get("temperature")
-        state["bedroom"]["humidity"] = data.get("humidity")
-        state["bedroom"]["light"] = data.get("light")
-        if "sw1_bed_light" in switches:
-            state["bedroom"]["sw1_bed_light"] = bool(switches["sw1_bed_light"])
+        espnow_ok = bool(data.get("espnow_online", True))
+        ble_ok = espnow_ok and bool(data.get("ble_online", False))
+
+        state["bedroom"]["espnow_online"] = espnow_ok
+        state["bedroom"]["ble_online"] = ble_ok
+
+        if ble_ok:
+            state["bedroom"]["temperature"] = data.get("temperature")
+            state["bedroom"]["humidity"] = data.get("humidity")
+            if data.get("temperature") is not None and data.get("humidity") is not None:
+                sensor_history.append({
+                    "t": time.strftime("%H:%M:%S"),
+                    "temp": float(data["temperature"]),
+                    "hum": float(data["humidity"]),
+                })
+        else:
+            state["bedroom"]["temperature"] = None
+            state["bedroom"]["humidity"] = None
+
+        if espnow_ok:
+            state["bedroom"]["light"] = data.get("light")
+            if "sw1_bed_light" in switches:
+                state["bedroom"]["sw1_bed_light"] = bool(switches["sw1_bed_light"])
+        else:
+            state["bedroom"]["light"] = None
+
         if "away_mode" in data:
             state["bedroom"]["away_mode"] = bool(data["away_mode"])
         state["bedroom"]["last_update"] = int(time.time())
-
-        if data.get("temperature") is not None and data.get("humidity") is not None:
-            sensor_history.append({
-                "t": time.strftime("%H:%M:%S"),
-                "temp": float(data["temperature"]),
-                "hum": float(data["humidity"]),
-            })
 
     elif topic == TOPIC_HUB_STATUS:
         was_online = state["hub"]["online"]
