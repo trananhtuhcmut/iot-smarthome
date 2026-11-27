@@ -1,0 +1,3 @@
+COREIOT_HOST  = "app.coreiot.io"
+COREIOT_PORT  = 1883
+GATEWAY_TOKEN = "fFjYIOYG7JjMvvYDjmLZ"
