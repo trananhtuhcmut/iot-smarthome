@@ -4,6 +4,7 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <DNSServer.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <LittleFS.h>
 #include <esp_now.h>
@@ -34,7 +35,7 @@
 #define HISTORY_MAX_POINTS      30    // Lưu 30 mẫu gần nhất cho đồ thị offline
 #define HISTORY_MIN_INTERVAL_MS 2000
 
-#define FW_VERSION "1.3.0-ws"
+#define FW_VERSION "1.3.1-ws-prov"
 
 // ==================== CÁC TOPIC LOCAL MQTT (HỢP ĐỒNG 2 - 1 RELAY) ====================
 const char* TOPIC_TELEMETRY  = "smarthome/bedroom/telemetry";
@@ -45,7 +46,7 @@ const char* TOPIC_AI_ALERT   = "smarthome/ai/alert";
 
 // ==================== FSM TRẠNG THÁI MẠNG (4 MÀU LED) ====================
 enum NetState : uint8_t {
-  NET_INIT             = 0, // Đỏ: Đang khởi tạo
+  NET_INIT             = 0, // Đỏ: Đang khởi tạo / đang kết nối Wi-Fi
   NET_ONLINE           = 1, // Xanh lá: Wi-Fi OK + MQTT OK
   NET_MQTT_OFFLINE_LAN = 2, // Tím: Wi-Fi LAN OK, MQTT chưa bật/lỗi
   NET_WIFI_OFFLINE_AP  = 3  // Xanh dương: Mất Wi-Fi / Chưa cấu hình -> Phát AP kênh 1
@@ -174,6 +175,23 @@ volatile bool mqttConfigDirty = false;
 volatile bool pendingReboot   = false;
 uint32_t pendingRebootAtMs    = 0;
 
+// Trạng thái cấp phát Wi-Fi giữ song song AP 5 giây để hiện IP mới
+enum WifiProvState : uint8_t {
+  PROV_IDLE       = 0,
+  PROV_PENDING    = 1, // Chờ 500ms để trình duyệt tải xong saved.html rồi mới gọi WiFi.begin
+  PROV_CONNECTING = 2, // Đang nối router (giữ song song SoftAP)
+  PROV_SUCCESS    = 3, // Đã có IP từ router -> giữ AP thêm 5s cho người dùng xem IP
+  PROV_FAILED     = 4  // Sai mật khẩu / không thấy Wi-Fi -> báo lỗi 8s rồi trả về FSM thường
+};
+
+volatile WifiProvState wifiProvState = PROV_IDLE;
+volatile bool     provIpDelivered    = false;
+volatile uint32_t apShutdownAtMs     = 0;
+uint32_t          provStartAtMs      = 0;
+uint32_t          provDeadlineMs     = 0;
+uint32_t          provFailClearAtMs  = 0;
+char              provAssignedIp[20] = "";
+
 bool isRetryingWifi         = false;
 bool forceMqttRetryNow      = false;
 uint8_t mqttFailStreak      = 0;
@@ -182,17 +200,25 @@ uint32_t wifiRetryStartMs   = 0;
 uint32_t lastMqttRetryMs    = 0;
 uint32_t lastStatusPubMs    = 0;
 
-const uint32_t WIFI_RETRY_INTERVAL_MS      = 30000;
-const uint32_t WIFI_RETRY_TIMEOUT_MS       = 5000;
-const uint32_t MQTT_RETRY_FAST_MS          = 5000;  // 3 lần đầu thử mỗi 5s
-const uint32_t MQTT_RETRY_SLOW_MS          = 15000; // Khi Broker chưa bật -> giãn 15s tránh nghẽn mạng
-const uint32_t STATUS_PUB_INTERVAL_MS      = 10000;
+const uint32_t WIFI_RETRY_INTERVAL_MS = 30000;
+const uint32_t WIFI_RETRY_TIMEOUT_MS  = 5000;
+const uint32_t MQTT_RETRY_FAST_MS     = 5000;  // 3 lần đầu thử mỗi 5s
+const uint32_t MQTT_RETRY_SLOW_MS     = 15000; // Khi Broker chưa bật -> giãn 15s tránh nghẽn mạng
+const uint32_t STATUS_PUB_INTERVAL_MS = 10000;
 
 // TaskWebServer (độc quyền HTTP + WebSocket + DNS)
 WebServer webServer(80);
 WebSocketsServer webSocket(81);
 DNSServer dnsServer;
 bool dnsRunning = false;
+
+void startMdnsService() {
+  MDNS.end();
+  if (MDNS.begin("yolouno")) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("[mDNS] San sang tai: http://yolouno.local/");
+  }
+}
 
 // ==================== HÀM ĐỌC / GHI / XÓA NVS ====================
 AppConfig getConfigSnapshot() {
@@ -548,7 +574,7 @@ void TaskEspNow(void* pvParameters) {
                         p.light_lux,
                         (p.switch_mask & SW_BED_LIGHT_BIT) ? "ON" : "OFF");
 
-          notifyWebClients(); // Bắn WebSocket xuống trình duyệt NGAY LẬP TỨC
+          notifyWebClients();
           xSemaphoreGive(xMqttPubTelemetrySem);
           executeEspNowTx(TX_SYNC_LVGL);
         }
@@ -728,7 +754,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
 
 bool connectMqttOnce() {
   if (strlen(activeMqttHost) == 0) {
-    return false; // Chưa nhập IP Broker -> giữ chế độ LAN (Tím) hoàn toàn yên tĩnh
+    return false;
   }
 
   String clientId = "YoloUNO_Hub_" + String((uint32_t)ESP.getEfuseMac(), HEX);
@@ -776,7 +802,6 @@ void enterWifiOfflineAp() {
 
 // ==================== TASK 2: FSM MẠNG & MQTT (CORE 0 - ƯU TIÊN 1) ====================
 void TaskNetworkMqtt(void* pvParameters) {
-  // Hạ timeout TCP xuống 2 giây để tránh treo lwIP khi Mosquitto chưa chạy
   wifiClient.setTimeout(2);
   mqttClient.setSocketTimeout(2);
   mqttClient.setBufferSize(512);
@@ -784,6 +809,59 @@ void TaskNetworkMqtt(void* pvParameters) {
   syncActiveMqttConfig();
 
   for (;;) {
+    // Pha cấp phát Wi-Fi mới: giữ song song SoftAP để báo IP cho người dùng trước khi tắt AP
+    if (wifiProvState != PROV_IDLE) {
+      if (wifiProvState == PROV_PENDING) {
+        if ((int32_t)(millis() - provStartAtMs) >= 0) {
+          AppConfig cfg = getConfigSnapshot();
+          if (mqttClient.connected()) mqttClient.disconnect();
+
+          setNetState(NET_INIT);  // Đèn Đỏ báo đang kết nối router
+          WiFi.disconnect(false); // Chỉ ngắt STA cũ, GIỮ NGUYÊN SoftAP
+          WiFi.begin(cfg.wifi_ssid, cfg.wifi_pass);
+
+          provDeadlineMs = millis() + 12000;
+          wifiProvState  = PROV_CONNECTING;
+          Serial.printf("[PROV] Dang ket noi router '%s' (giu song song AP)...\n", cfg.wifi_ssid);
+        }
+      } else if (wifiProvState == PROV_CONNECTING) {
+        if (WiFi.status() == WL_CONNECTED) {
+          snprintf(provAssignedIp, sizeof(provAssignedIp), "%s",
+                   WiFi.localIP().toString().c_str());
+          startMdnsService();
+
+          provIpDelivered = false;
+          apShutdownAtMs  = millis() + 15000; // Tối đa 15s nếu trình duyệt đã đóng
+          wifiProvState   = PROV_SUCCESS;
+          Serial.printf("[PROV] >>> Router da cap IP: %s (cho hien len web 5s truoc khi tat AP)\n",
+                        provAssignedIp);
+        } else if ((int32_t)(millis() - provDeadlineMs) >= 0) {
+          Serial.println("[PROV] Ket noi Wi-Fi that bai (sai mat khau hoac ngoai vung phu song)!");
+          wifiProvState     = PROV_FAILED;
+          provFailClearAtMs = millis() + 8000; // Giữ trạng thái lỗi 8s cho web kịp hiện thông báo
+          enterWifiOfflineAp();                // Khóa lại kênh 1, đèn Xanh dương
+        }
+      } else if (wifiProvState == PROV_SUCCESS) {
+        if ((int32_t)(millis() - apShutdownAtMs) >= 0) {
+          Serial.printf("[PROV] Het 5s hien thi IP -> Tat SoftAP, chuyen sang mang LAN (%s)\n",
+                        provAssignedIp);
+          WiFi.softAPdisconnect(true);
+          wifiProvState     = PROV_IDLE;
+          syncActiveMqttConfig();
+          mqttFailStreak    = 0;
+          forceMqttRetryNow = true;
+          setNetState(NET_MQTT_OFFLINE_LAN); // Chuyển Tím -> tự thử nối MQTT lên Xanh lá
+        }
+      } else if (wifiProvState == PROV_FAILED) {
+        if ((int32_t)(millis() - provFailClearAtMs) >= 0) {
+          wifiProvState = PROV_IDLE; // Trả quyền lại cho FSM thường tự tìm router mỗi 30s
+        }
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(20));
+      continue;
+    }
+
     if (mqttConfigDirty) {
       mqttConfigDirty = false;
       mqttFailStreak  = 0;
@@ -845,7 +923,7 @@ void TaskNetworkMqtt(void* pvParameters) {
         }
 
         if (strlen(activeMqttHost) == 0) {
-          break; // Chưa điền IP MQTT -> không gọi connect vô ích
+          break;
         }
 
         uint32_t retryGap = (mqttFailStreak >= 3) ? MQTT_RETRY_SLOW_MS : MQTT_RETRY_FAST_MS;
@@ -862,6 +940,7 @@ void TaskNetworkMqtt(void* pvParameters) {
       case NET_WIFI_OFFLINE_AP: {
         if (WiFi.status() == WL_CONNECTED) {
           WiFi.softAPdisconnect(true);
+          startMdnsService();
           isRetryingWifi    = false;
           forceMqttRetryNow = true;
           mqttFailStreak    = 0;
@@ -1119,6 +1198,41 @@ void handleApiAway() {
   webServer.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"wroom_offline\"}");
 }
 
+void handleApiProvStatus() {
+  JsonDocument doc;
+  WifiProvState st = wifiProvState;
+
+  if (st == PROV_PENDING || st == PROV_CONNECTING) {
+    doc["state"] = "connecting";
+  } else if (st == PROV_SUCCESS) {
+    if (!provIpDelivered) {
+      provIpDelivered = true;
+      apShutdownAtMs  = millis() + 5000;
+    }
+    int32_t remMs = (int32_t)(apShutdownAtMs - millis());
+    if (remMs < 0) remMs = 0;
+
+    doc["state"]         = "connected";
+    doc["ip"]            = provAssignedIp;
+    doc["mdns"]          = "yolouno.local";
+    doc["remaining_sec"] = (remMs + 999) / 1000;
+  } else if (st == PROV_FAILED) {
+    doc["state"] = "failed";
+  } else if (WiFi.status() == WL_CONNECTED) {
+    doc["state"]         = "mqtt_updated";
+    doc["ip"]            = WiFi.localIP().toString();
+    doc["mdns"]          = "yolouno.local";
+    doc["remaining_sec"] = 3;
+  } else {
+    doc["state"] = "idle";
+  }
+
+  String out;
+  serializeJson(doc, out);
+  webServer.sendHeader("Cache-Control", "no-store");
+  webServer.send(200, "application/json", out);
+}
+
 void handleWebSave() {
   AppConfig oldCfg = getConfigSnapshot();
   AppConfig newCfg = oldCfg;
@@ -1168,11 +1282,13 @@ void handleWebSave() {
   saveConfigToNvs(newCfg);
   serveHtmlFile("/saved.html");
 
-  bool needReboot = (ssidChanged || passChanged || WiFi.status() != WL_CONNECTED);
-  if (needReboot) {
-    pendingReboot     = true;
-    pendingRebootAtMs = millis() + 2000;
+  bool needWifiReconnect = (ssidChanged || passChanged || WiFi.status() != WL_CONNECTED);
+  if (needWifiReconnect) {
+    provIpDelivered = false;
+    provStartAtMs   = millis() + 500;
+    wifiProvState   = PROV_PENDING;
   } else {
+    wifiProvState   = PROV_IDLE;
     mqttConfigDirty = true;
   }
 }
@@ -1195,15 +1311,16 @@ void handleWebNotFound() {
 
 // ==================== TASK 3: HTTP + WEBSOCKET + DNS (CORE 1 - ƯU TIÊN 2) ====================
 void TaskWebServer(void* pvParameters) {
-  webServer.on("/",           HTTP_GET,  handleWebRoot);
-  webServer.on("/config",     HTTP_GET,  handleWebConfig);
-  webServer.on("/api/status", HTTP_GET,  handleApiStatus);
-  webServer.on("/api/config", HTTP_GET,  handleApiConfig);
-  webServer.on("/api/scan",   HTTP_GET,  handleApiScan);
-  webServer.on("/api/toggle", HTTP_ANY,  handleApiToggle);
-  webServer.on("/api/away",   HTTP_ANY,  handleApiAway);
-  webServer.on("/save",       HTTP_POST, handleWebSave);
-  webServer.on("/reset",      HTTP_POST, handleWebReset);
+  webServer.on("/",                HTTP_GET,  handleWebRoot);
+  webServer.on("/config",          HTTP_GET,  handleWebConfig);
+  webServer.on("/api/status",      HTTP_GET,  handleApiStatus);
+  webServer.on("/api/config",      HTTP_GET,  handleApiConfig);
+  webServer.on("/api/scan",        HTTP_GET,  handleApiScan);
+  webServer.on("/api/prov_status", HTTP_GET,  handleApiProvStatus);
+  webServer.on("/api/toggle",      HTTP_ANY,  handleApiToggle);
+  webServer.on("/api/away",        HTTP_ANY,  handleApiAway);
+  webServer.on("/save",            HTTP_POST, handleWebSave);
+  webServer.on("/reset",           HTTP_POST, handleWebReset);
   webServer.onNotFound(handleWebNotFound);
   webServer.begin();
 
@@ -1227,7 +1344,6 @@ void TaskWebServer(void* pvParameters) {
     webServer.handleClient();
     webSocket.loop();
 
-    // Chỉ đẩy WebSocket từ duy nhất TaskWebServer để an toàn tuyệt đối cho lwIP
     if (xSemaphoreTake(xWsBroadcastSem, 0) == pdTRUE) {
       if (webSocket.connectedClients() > 0) {
         String out = buildStatusJson();
@@ -1246,7 +1362,7 @@ void TaskWebServer(void* pvParameters) {
 // ==================== KHỞI TẠO WI-FI (TỪ NVS) & ESP-NOW ====================
 void initWiFiAndEspNow() {
   WiFi.mode(WIFI_AP_STA);
-  WiFi.setSleep(false); // Tắt Modem Sleep giúp WebSocket & ESP-NOW phản hồi tức thì
+  WiFi.setSleep(false);
   WiFi.setAutoReconnect(false);
 
   AppConfig cfg = getConfigSnapshot();
@@ -1263,6 +1379,7 @@ void initWiFiAndEspNow() {
 
     if (WiFi.status() == WL_CONNECTED) {
       WiFi.softAPdisconnect(true);
+      startMdnsService();
       Serial.printf("[WIFI] Ket noi router OK! Web T07 LAN: http://%s/ | Kenh: %ld\n",
                     WiFi.localIP().toString().c_str(), (long)WiFi.channel());
     } else {
@@ -1316,7 +1433,7 @@ void setup() {
   xTaskCreatePinnedToCore(TaskWebServer,   "WebServer", 8192, nullptr, 2, nullptr, 1);
   xTaskCreatePinnedToCore(TaskNetworkMqtt, "NetMqtt",   6144, nullptr, 1, nullptr, 0);
 
-  Serial.println("[SYSTEM] YoloUNO S3 Hub (FreeRTOS + WebSocket + Retry) san sang!");
+  Serial.println("[SYSTEM] YoloUNO S3 Hub (FreeRTOS + WebSocket + Prov + Retry) san sang!");
 }
 
 void loop() {

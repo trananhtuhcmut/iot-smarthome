@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Settings Saved - YoloUNO Local Hub</title>
+  <title>Settings Saved — YoloUNO Local Hub</title>
   <script>
     document.documentElement.setAttribute('data-theme', localStorage.getItem('hub_theme') || 'slate');
   </script>
   <style>
-/* Theme 1: Rose & Cream (#FFCED8, #FFDDDD, #FFF4DE, #FFE8C4) */
+    /* Theme 1: Rose & Cream */
     :root, [data-theme="pastel"] {
-          --bg: #f7dfba;
+      --bg: #f7dfba;
       --card: #FFFFFF;
       --tile: #FFDDDD;
       --border: #FFE8C4;
@@ -33,7 +33,7 @@
       --alert-text: #4a202c;
     }
 
-    /* Theme 2: Cyan & Grape (#59C3C3, #52489C, #EBEBEB, #CAD2C5, #84A98C) */
+    /* Theme 2: Cyan & Grape */
     [data-theme="cyan"] {
       --bg: #dff4fc;
       --card: #FFFFFF;
@@ -58,7 +58,7 @@
       --alert-text: #ffffff;
     }
 
-    /* Theme 3: Peach & Sky (#F4BAA3, #F4F0E2, #A6C8E2, #619DC6) */
+    /* Theme 3: Peach & Sky */
     [data-theme="peach"] {
       --bg: #e4f4e2;
       --card: #FFFFFF;
@@ -83,7 +83,7 @@
       --alert-text: #4a2016;
     }
 
-/* Theme 4: Modern Slate (Light & Auto Dark Mode) */
+    /* Theme 4: Modern Slate (Light & Auto Dark Mode) */
     [data-theme="slate"] {
       --bg: #f1f5f9;
       --card: #ffffff;
@@ -108,7 +108,7 @@
       --alert-border: #dc2626;
       --alert-text: #991b1b;
     }
-@media (prefers-color-scheme: dark) {
+    @media (prefers-color-scheme: dark) {
       [data-theme="slate"] {
         --bg: #0b1120;
         --card: #1e293b;
@@ -141,7 +141,6 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    /* Header & Theme Switcher */
     .header {
       display: flex;
       align-items: center;
@@ -184,7 +183,6 @@
       transform: scale(1.08);
     }
 
-    /* Card */
     .card {
       background: var(--card);
       border: 1.5px solid var(--border);
@@ -209,6 +207,17 @@
       color: var(--accent);
     }
 
+    .spinner {
+      width: 24px;
+      height: 24px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.85s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
     h3 {
       font-size: 18px;
       font-weight: 700;
@@ -222,7 +231,49 @@
       margin-bottom: 16px;
     }
 
-    /* Status Box & Progress */
+    .ip-box {
+      display: none;
+      background: var(--tile);
+      border: 1.5px dashed var(--accent);
+      border-radius: 12px;
+      padding: 14px 12px;
+      margin-bottom: 14px;
+    }
+
+    .ip-label {
+      font-size: 11.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    .ip-value {
+      font-size: 21px;
+      font-weight: 800;
+      color: var(--accent);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.02em;
+      margin-bottom: 4px;
+      word-break: break-all;
+    }
+
+    .mdns-note {
+      font-size: 12.5px;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    .copy-btn {
+      width: auto !important;
+      padding: 6px 14px !important;
+      font-size: 12px !important;
+      border-radius: 999px !important;
+      background: var(--btn-blue-bg);
+      color: var(--btn-blue-text);
+    }
+
     .status-box {
       background: var(--tile);
       border: 1px solid var(--border);
@@ -248,15 +299,19 @@
       width: 100%;
       background: var(--accent);
       border-radius: 999px;
-      animation: shrink 5s linear forwards;
+      transition: width 0.35s linear;
     }
 
-    @keyframes shrink {
-      from { width: 100%; }
-      to { width: 0%; }
+    .bar-fill.indeterminate {
+      width: 40%;
+      animation: slide 1.1s ease-in-out infinite;
     }
 
-    /* Buttons */
+    @keyframes slide {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(300%); }
+    }
+
     .btn-row {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -278,6 +333,7 @@
     button:not(.sw-dot):active { transform: scale(0.98); }
 
     .on { background: var(--btn-on-bg); color: var(--btn-on-text); }
+    .off { background: var(--btn-off-bg); color: var(--btn-off-text); }
     .gray { background: var(--btn-gray-bg); color: var(--btn-gray-text); }
 
     a { display: block; text-decoration: none; }
@@ -295,8 +351,7 @@
   <div class="header">
     <h2>YoloUNO Local Hub (T07)</h2>
     <div class="theme-sw" title="Switch color palette">
-            <button type="button" class="sw-dot" data-t="slate" onclick="setTheme('slate')" style="background:linear-gradient(135deg,#f1f5f9 50%,#0b1120 50%)" aria-label="Modern Slate"></button>
-
+      <button type="button" class="sw-dot" data-t="slate" onclick="setTheme('slate')" style="background:linear-gradient(135deg,#f1f5f9 50%,#0b1120 50%)" aria-label="Modern Slate"></button>
       <button type="button" class="sw-dot" data-t="pastel" onclick="setTheme('pastel')" style="background:linear-gradient(135deg,#FFCED8 50%,#FFE8C4 50%)" aria-label="Rose & Cream"></button>
       <button type="button" class="sw-dot" data-t="cyan" onclick="setTheme('cyan')" style="background:linear-gradient(135deg,#59C3C3 50%,#52489C 50%)" aria-label="Cyan & Grape"></button>
       <button type="button" class="sw-dot" data-t="peach" onclick="setTheme('peach')" style="background:linear-gradient(135deg,#619DC6 50%,#F4BAA3 50%)" aria-label="Peach & Sky"></button>
@@ -304,24 +359,31 @@
   </div>
 
   <div class="card">
-    <div class="icon-ring">
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="icon-ring" id="iconRing">
+      <div class="spinner"></div>
     </div>
-    <h3>Settings Saved & Applied</h3>
-    <p class="msg">Wi-Fi & MQTT credentials have been stored in NVS. YoloUNO Local Hub is rebooting to apply the new network configuration.</p>
+    <h3 id="titleText">Connecting to Wi-Fi...</h3>
+    <p class="msg" id="msgText">Saved to NVS. Waiting for router to assign an IP address...</p>
 
-    <div class="status-box">
-      <span id="statusText">Returning to dashboard in <strong id="sec">5</strong>s...</span>
-      <div class="bar-track"><div class="bar-fill"></div></div>
+    <div class="ip-box" id="ipBox">
+      <div class="ip-label">New Router IP Address</div>
+      <div class="ip-value" id="ipValue">---</div>
+      <div class="mdns-note" id="mdnsNote">Or open: http://yolouno.local/</div>
+      <button type="button" class="copy-btn" id="btnCopy" onclick="copyIp()">Copy URL</button>
+    </div>
+
+    <div class="status-box" id="statusBox">
+      <span id="statusText">Requesting DHCP IP from router...</span>
+      <div class="bar-track"><div class="bar-fill indeterminate" id="barFill"></div></div>
     </div>
 
     <div class="btn-row">
-      <a href="/"><button type="button" class="on">Dashboard</button></a>
+      <a id="dashLink" href="/"><button type="button" class="on" id="btnDash">Dashboard</button></a>
       <a href="/config"><button type="button" class="gray">Settings</button></a>
     </div>
   </div>
 
-  <small class="footer">If Wi-Fi SSID changed, reconnect your device to the new network.</small>
+  <small class="footer" id="footerNote">Keep this page open to see the assigned IP address.</small>
 
   <script>
     function setTheme(t) {
@@ -329,20 +391,120 @@
       localStorage.setItem('hub_theme', t);
       document.querySelectorAll('.sw-dot').forEach(b => b.classList.toggle('active', b.dataset.t === t));
     }
-    setTheme(localStorage.getItem('hub_theme') || 'pastel');
+    setTheme(localStorage.getItem('hub_theme') || 'slate');
 
-    let left = 5;
-    const secEl = document.getElementById('sec');
-    const timer = setInterval(() => {
-      left--;
-      if (left <= 0) {
-        clearInterval(timer);
-        document.getElementById('statusText').textContent = 'Redirecting now...';
-        window.location.href = '/';
+    const iconOk = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    const iconErr = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+    let assignedUrl = '';
+    let pollTimer   = null;
+    let cdTimer     = null;
+    let isDone      = false;
+
+    function copyIp() {
+      if (!assignedUrl) return;
+      const btn = document.getElementById('btnCopy');
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(assignedUrl).then(() => {
+          btn.textContent = 'Copied!';
+          setTimeout(() => btn.textContent = 'Copy URL', 1500);
+        });
       } else {
-        secEl.textContent = left;
+        prompt('Copy this URL:', assignedUrl);
       }
-    }, 1000);
+    }
+
+    function startCountdown(sec, isMqttOnly) {
+      let left = sec;
+      const bar = document.getElementById('barFill');
+      bar.classList.remove('indeterminate');
+      bar.style.width = '100%';
+
+      function tick() {
+        if (left <= 0) {
+          clearInterval(cdTimer);
+          bar.style.width = '0%';
+          if (isMqttOnly) {
+            document.getElementById('statusText').textContent = 'Redirecting to dashboard...';
+            window.location.href = '/';
+          } else {
+            document.getElementById('statusText').textContent =
+              'SoftAP closed. Switch back to your Wi-Fi router and open ' + assignedUrl;
+          }
+          return;
+        }
+        document.getElementById('statusText').innerHTML = isMqttOnly
+          ? `Returning to dashboard in <strong>${left}</strong>s...`
+          : `Closing YoloUNO_Offline AP in <strong>${left}</strong>s...`;
+        bar.style.width = Math.round((left / sec) * 100) + '%';
+        left--;
+      }
+      tick();
+      cdTimer = setInterval(tick, 1000);
+    }
+
+    async function pollProvisioning() {
+      if (isDone) return;
+      try {
+        const res = await fetch('/api/prov_status', { cache: 'no-store' });
+        if (!res.ok) return;
+        const d = await res.json();
+
+        if (d.state === 'connected') {
+          isDone = true;
+          clearInterval(pollTimer);
+          assignedUrl = 'http://' + d.ip + '/';
+
+          document.getElementById('iconRing').innerHTML = iconOk;
+          document.getElementById('titleText').textContent = 'Wi-Fi Connected!';
+          document.getElementById('msgText').textContent = 'Save the IP address below, then reconnect your device to your home Wi-Fi.';
+          document.getElementById('ipValue').textContent = assignedUrl;
+          document.getElementById('mdnsNote').textContent = 'Or open: http://' + d.mdns + '/';
+          document.getElementById('ipBox').style.display = 'block';
+          document.getElementById('dashLink').href = assignedUrl;
+          document.getElementById('btnDash').textContent = 'Open New IP';
+          document.getElementById('footerNote').textContent = 'Reconnect to your Wi-Fi router before clicking Open New IP.';
+
+          startCountdown(d.remaining_sec || 5, false);
+        } else if (d.state === 'mqtt_updated') {
+          isDone = true;
+          clearInterval(pollTimer);
+          assignedUrl = 'http://' + d.ip + '/';
+
+          document.getElementById('iconRing').innerHTML = iconOk;
+          document.getElementById('titleText').textContent = 'MQTT Settings Applied';
+          document.getElementById('msgText').textContent = 'Broker configuration saved to NVS without rebooting.';
+          document.getElementById('ipValue').textContent = assignedUrl;
+          document.getElementById('ipBox').style.display = 'block';
+          startCountdown(3, true);
+        } else if (d.state === 'failed') {
+          isDone = true;
+          clearInterval(pollTimer);
+
+          document.getElementById('iconRing').innerHTML = iconErr;
+          document.getElementById('titleText').textContent = 'Wi-Fi Connection Failed';
+          document.getElementById('msgText').textContent = 'Wrong password or router out of range. YoloUNO_Offline AP is still active.';
+          document.getElementById('statusText').textContent = 'Please go back to Settings and try again.';
+          document.getElementById('barFill').classList.remove('indeterminate');
+          document.getElementById('barFill').style.width = '0%';
+        }
+      } catch (e) {
+        // Bỏ qua lỗi tạm thời (~1-2s) nếu điện thoại đang chuyển kênh sóng cùng SoftAP
+      }
+    }
+
+    // Nếu vừa bấm Reset NVS (/reset) thì không cần poll nối Wi-Fi
+    if (window.location.pathname === '/reset') {
+      document.getElementById('iconRing').innerHTML = iconOk;
+      document.getElementById('titleText').textContent = 'Factory Reset Complete';
+      document.getElementById('msgText').textContent = 'NVS erased. YoloUNO is rebooting into YoloUNO_Offline AP mode...';
+      document.getElementById('statusText').textContent = 'Reconnect to YoloUNO_Offline in a few seconds.';
+      document.getElementById('barFill').classList.remove('indeterminate');
+      document.getElementById('barFill').style.width = '100%';
+    } else {
+      pollProvisioning();
+      pollTimer = setInterval(pollProvisioning, 800);
+    }
   </script>
 </body>
 </html>
