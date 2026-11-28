@@ -8,6 +8,7 @@
   #define FONT_VALUE LV_FONT_DEFAULT
 #endif
 
+static lv_obj_t *btn_info = NULL;
 static lv_obj_t *lbl_conn = NULL;
 static lv_obj_t *lbl_temp = NULL;
 static lv_obj_t *lbl_humi = NULL;
@@ -212,26 +213,26 @@ void ui_panel_init(RelayToggleCallback relayCb, AwayModeToggleCallback awayCb, b
   lv_obj_set_style_pad_hor(header, 8, 0);
 
   lv_obj_t *lblTitle = lv_label_create(header);
-  lv_label_set_text(lblTitle, "SMARTHOME");
+  lv_label_set_text(lblTitle, "SMARTHOME N03");
   lv_obj_set_style_text_color(lblTitle, lv_color_hex(0x38BDF8), 0);
   lv_obj_align(lblTitle, LV_ALIGN_LEFT_MID, 0, 0);
 
-  lv_obj_t *btnInfo = lv_btn_create(header);
-  lv_obj_set_size(btnInfo, 44, 22);
-  lv_obj_align(btnInfo, LV_ALIGN_RIGHT_MID, 0, 0);
-  lv_obj_set_style_bg_color(btnInfo, lv_color_hex(0x334155), 0);
-  lv_obj_set_style_radius(btnInfo, 6, 0);
-  lv_obj_set_style_pad_all(btnInfo, 0, 0);
-  lv_obj_add_event_cb(btnInfo, on_info_open, LV_EVENT_CLICKED, NULL);
+  btn_info = lv_btn_create(header);
+  lv_obj_set_size(btn_info, 44, 22);
+  lv_obj_align(btn_info, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_set_style_bg_color(btn_info, lv_color_hex(0x334155), 0);
+  lv_obj_set_style_radius(btn_info, 6, 0);
+  lv_obj_set_style_pad_all(btn_info, 0, 0);
+  lv_obj_add_event_cb(btn_info, on_info_open, LV_EVENT_CLICKED, NULL);
 
-  lv_obj_t *lblInfoBtn = lv_label_create(btnInfo);
+  lv_obj_t *lblInfoBtn = lv_label_create(btn_info);
   lv_label_set_text(lblInfoBtn, "INFO");
   lv_obj_center(lblInfoBtn);
 
   lbl_conn = lv_label_create(header);
   lv_label_set_text(lbl_conn, "OFFLINE");
   lv_obj_set_style_text_color(lbl_conn, lv_color_hex(0xEF4444), 0);
-  lv_obj_align_to(lbl_conn, btnInfo, LV_ALIGN_OUT_LEFT_MID, -52, 0);
+  lv_obj_align_to(lbl_conn, btn_info, LV_ALIGN_OUT_LEFT_MID, -6, 0);
 
   // 2. Hang pill trang thai YoloUNO: ESP-NOW & BLE (C3)
   create_status_pill(scr, 10,  32, "ESP-NOW",  &dot_espnow, &lbl_espnow_st);
@@ -297,6 +298,8 @@ void ui_panel_init(RelayToggleCallback relayCb, AwayModeToggleCallback awayCb, b
 
   lbl_info_wifi = lv_label_create(infoModal);
   lv_label_set_text(lbl_info_wifi, "Wi-Fi: --  |  CH: --");
+  lv_label_set_long_mode(lbl_info_wifi, LV_LABEL_LONG_DOT);
+  lv_obj_set_width(lbl_info_wifi, 266);
   lv_obj_set_style_text_color(lbl_info_wifi, lv_color_hex(0xCBD5E1), 0);
   lv_obj_set_pos(lbl_info_wifi, 0, 48);
 
@@ -398,6 +401,9 @@ void ui_panel_set_net_status(NetStatus status) {
       lv_obj_set_style_text_color(lbl_info_net, lv_color_hex(0xEF4444), 0);
       break;
   }
+  if (btn_info != NULL) {
+    lv_obj_align_to(lbl_conn, btn_info, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+  }
 }
 
 void ui_panel_set_sys_info(const char *wifiSsid, uint8_t channel,
@@ -446,7 +452,7 @@ void ui_panel_update_sensors(float temp, float humi, int lightLux,
   set_status_pill(dot_ble, lbl_ble_st, bleOnline);
 
   if (bleOnline && !isnan(temp)) {
-    snprintf(buf, sizeof(buf), "%.1f C", temp);
+    snprintf(buf, sizeof(buf), "%.1f \xC2\xB0" "C", temp);
     lv_label_set_text(lbl_temp, buf);
   } else {
     lv_label_set_text(lbl_temp, "--");
