@@ -8,7 +8,7 @@
 #include "espnow_protocol.h"
 
 // ==================== CẤU HÌNH PHẦN CỨNG & MẠNG ====================
-#define NEO_PIN          45    // Đèn RGB NeoPixel tích hợp trên YoloUNO (ESP32-S3)
+#define NEO_PIN          48    // Đèn RGB NeoPixel tích hợp trên YoloUNO (ESP32-S3)
 #define LED_COUNT        1
 #define NEO_BRIGHTNESS   60    // Độ sáng 0-255
 #define PIN_BOOT_BTN     0     // Nút BOOT tích hợp (nhấn giữ 5s để reset NVS)

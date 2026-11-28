@@ -125,6 +125,34 @@ static void executeEspNowTx(EspNowTxAction action) {
       snprintf(pkt.alert_msg, sizeof(pkt.alert_msg), "%u|%s", ch, ssidBuf);
     }
     pkt.msg_type = MSG_STATE_SYNC;
+
+    // Chỉ gán báo mất MQTT nếu không có cảnh báo khẩn đang bật
+    if (pkt.alert_code == ALERT_NONE && currentNetState != NET_ONLINE) {
+      pkt.alert_code = ALERT_GATEWAY_OFFLINE;
+    }
+
+    // Mượn alert_msg[32] gửi "<ch>|<ssid>" khi không có cảnh báo khẩn
+    if (pkt.alert_code == ALERT_NONE || pkt.alert_code == ALERT_GATEWAY_OFFLINE) {
+      int ch = FALLBACK_CHANNEL;
+      String ssidStr = "--";
+
+      if (currentNetState == NET_WIFI_OFFLINE_AP) {
+        ch      = FALLBACK_CHANNEL;
+        ssidStr = String("AP:") + FALLBACK_AP_SSID;
+      } else if (WiFi.status() == WL_CONNECTED) {
+        int rawCh = WiFi.channel();
+        ch = (rawCh >= 1 && rawCh <= 13) ? rawCh : FALLBACK_CHANNEL;
+        String curSsid = WiFi.SSID();
+        ssidStr = (curSsid.length() > 0) ? curSsid : "--";
+      } else {
+        int rawCh = WiFi.channel();
+        ch      = (rawCh >= 1 && rawCh <= 13) ? rawCh : FALLBACK_CHANNEL;
+        ssidStr = "Connecting...";
+      }
+
+      snprintf(pkt.alert_msg, sizeof(pkt.alert_msg), "%d|%s", ch, ssidStr.c_str());
+    }
+
     sendEspNowToPeer(lvglMac, hasLvglMac, pkt, "LVGL", 2);
   } else if (action == TX_ALERT_LVGL) {
     pkt.msg_type = MSG_ALERT;
@@ -221,6 +249,10 @@ void TaskEspNow(void* pvParameters) {
           executeEspNowTx(TX_CMD_WROOM);
           xSemaphoreGive(xMqttPubTelemetrySem);
         } else if (p.msg_type == MSG_STATE_SYNC) {
+          executeEspNowTx(TX_SYNC_LVGL);
+        }
+         else if (p.msg_type == MSG_STATE_SYNC) {
+          Serial.println("[ESP-NOW <- LVGL] Nhan goi tham do -> Gui dong bo trang thai ngay");
           executeEspNowTx(TX_SYNC_LVGL);
         }
       }
